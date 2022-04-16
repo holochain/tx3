@@ -1,16 +1,16 @@
 //! Stream multiplexing
 
-use crate::*;
 use crate::framed::*;
-use std::task::Poll;
-use std::task::Context;
-use std::pin::Pin;
-use tokio::sync::Semaphore;
-use tokio::sync::OwnedSemaphorePermit;
-use std::sync::Arc;
-use futures_util::future::BoxFuture;
+use crate::*;
+use futures::future::BoxFuture;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 mod mark;
 pub use mark::*;
@@ -18,10 +18,7 @@ pub use mark::*;
 /// Construct a new mplex handle / incoming receiver stream pair
 ///
 /// Panics if `max_bytes > (u32::MAX >> 3)`
-pub fn new_mplex<F>(
-    _framed: F,
-    max_bytes: u32,
-) -> (Mplex, MplexInbound)
+pub fn new_mplex<F>(_framed: F, max_bytes: u32) -> (Mplex, MplexInbound)
 where
     F: Framed + Unpin,
 {
@@ -42,9 +39,7 @@ where
         out_send,
     };
 
-    let recv = MplexInbound {
-        inbound_recv,
-    };
+    let recv = MplexInbound { inbound_recv };
 
     (hnd, recv)
 }
@@ -86,9 +81,12 @@ impl tokio::io::AsyncWrite for MplexStream {
         }
         if self.want_out_permit.is_none() {
             let out_limit = self.out_limit.clone();
-            self.want_out_permit = Some((take_len, Box::pin(async move {
-                out_limit.acquire_many_owned(take_len as u32).await.unwrap()
-            })));
+            self.want_out_permit = Some((
+                take_len,
+                Box::pin(
+                    async move { out_limit.acquire_many_owned(take_len as u32).await.unwrap() },
+                ),
+            ));
         }
         let permit = match self.want_out_permit.as_mut().unwrap().1.as_mut().poll(cx) {
             Poll::Pending => return Poll::Pending,
@@ -99,10 +97,7 @@ impl tokio::io::AsyncWrite for MplexStream {
         Poll::Ready(Ok(take_len))
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         if self.want_flush.is_none() {
             let (s, r) = tokio::sync::oneshot::channel();
             let _ = self.out_send.send(OutCmd::Flush(self.stream_id, s));
@@ -115,10 +110,7 @@ impl tokio::io::AsyncWrite for MplexStream {
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         if self.want_shutdown.is_none() {
             let (s, r) = tokio::sync::oneshot::channel();
             let _ = self.out_send.send(OutCmd::Shutdown(self.stream_id, s));
@@ -137,19 +129,16 @@ pub struct MplexInbound {
     inbound_recv: tokio::sync::mpsc::Receiver<Result<MplexStream>>,
 }
 
-impl futures_util::Stream for MplexInbound {
+impl futures::Stream for MplexInbound {
     type Item = Result<MplexStream>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inbound_recv.poll_recv(cx)
     }
 }
 
 /// Multiplexer built atop a Framed IO device
-pub struct Mplex{
+pub struct Mplex {
     next_id: Arc<atomic::AtomicU64>,
     out_limit: Arc<Semaphore>,
     out_send: OutboundSend,

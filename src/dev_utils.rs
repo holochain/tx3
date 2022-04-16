@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 /// Get the "localhost" ephemeral self signed tls certificate
-pub fn localhost_self_signed_tls_cert(
-) -> (rustls::Certificate, rustls::PrivateKey) {
-    let cert =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+pub fn localhost_self_signed_tls_cert() -> (rustls::Certificate, rustls::PrivateKey) {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let pk = rustls::PrivateKey(cert.serialize_private_key_der());
     let cert = rustls::Certificate(cert.serialize_der().unwrap());
     (cert, pk)
