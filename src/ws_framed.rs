@@ -1,6 +1,13 @@
-use super::*;
+//! Wrapper struct to turn a stream into a websocket backed framed stream/sink
 
-/// Wrapper struct to turn a tokio_tungstenite websocket stream into a Framed
+use crate::*;
+use futures::{Sink, Stream};
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
+use tokio_tungstenite::tungstenite::Message;
+
+/// Wrapper struct to turn a stream into a websocket backed framed stream/sink
 pub struct WsFramed<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -17,9 +24,7 @@ where
         let ws = tokio_tungstenite::accept_async(s)
             .await
             .map_err(other_err)?;
-        Ok(Self {
-            ws,
-        })
+        Ok(Self { ws })
     }
 
     /// Construct a new WsFramed as a client-side stream
@@ -27,19 +32,20 @@ where
         let (ws, _) = tokio_tungstenite::client_async("wss://localhost", s)
             .await
             .map_err(other_err)?;
-        Ok(Self {
-            ws,
-        })
+        Ok(Self { ws })
     }
 }
 
-impl<S> futures::Sink<BytesList> for WsFramed<S>
+impl<S> Sink<Vec<u8>> for WsFramed<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     type Error = std::io::Error;
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
         match Pin::new(&mut self.ws).poll_ready(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => Poll::Ready(Err(other_err(err))),
@@ -47,15 +53,16 @@ where
         }
     }
 
-    fn start_send(mut self: Pin<&mut Self>, mut item: BytesList) -> Result<()> {
-        let mut out = Vec::with_capacity(item.remaining());
-        item.copy_to_slice(&mut out[..]);
+    fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<()> {
         Pin::new(&mut self.ws)
-            .start_send(Message::Binary(out))
+            .start_send(Message::Binary(item))
             .map_err(other_err)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
         match Pin::new(&mut self.ws).poll_flush(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => Poll::Ready(Err(other_err(err))),
@@ -63,7 +70,10 @@ where
         }
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
         match Pin::new(&mut self.ws).poll_close(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => Poll::Ready(Err(other_err(err))),
@@ -72,17 +82,22 @@ where
     }
 }
 
-impl<S> futures::Stream for WsFramed<S>
+impl<S> Stream for WsFramed<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    type Item = Result<BytesList>;
+    type Item = Result<Vec<u8>>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         let out = match Pin::new(&mut self.ws).poll_next(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(other_err(err)))),
+            Poll::Ready(Some(Err(err))) => {
+                return Poll::Ready(Some(Err(other_err(err))))
+            }
             Poll::Ready(Some(Ok(item))) => match item {
                 Message::Text(s) => s.into_bytes(),
                 Message::Binary(b) => b,
@@ -98,12 +113,10 @@ where
                 Message::Frame(f) => f.into_data(),
             },
         };
-        Poll::Ready(Some(Ok(out.into())))
+        Poll::Ready(Some(Ok(out)))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.ws.size_hint()
     }
 }
-
-impl<S> Framed for WsFramed<S> where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {}

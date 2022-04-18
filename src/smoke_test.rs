@@ -1,6 +1,6 @@
+/*
+use crate::ws_framed::*;
 use crate::*;
-//use crate::framed::*;
-//use crate::ws_stream::*;
 use std::net::SocketAddr;
 
 async fn listener() -> SocketAddr {
@@ -16,30 +16,34 @@ async fn listener() -> SocketAddr {
 
 fn handle_con_srv(con: tokio::net::TcpStream) {
     tokio::task::spawn(async move {
-        let (cert, pk) = dev_utils::localhost_self_signed_tls_cert();
-        let config = dev_utils::simple_server_config(cert, pk);
-        let _con: tokio_rustls::TlsStream<tokio::net::TcpStream> =
+        let (cert, pk) = tls::localhost_self_signed_tls_cert();
+        let config = tls::simple_server_config(cert, pk);
+        let con: tokio_rustls::TlsStream<tokio::net::TcpStream> =
             config.accept(con).await.unwrap().into();
-        //let con = tokio_tungstenite::accept_async(con).await.unwrap();
-        //let _con = WsStream::accept(con);
-        //let con = WsFramed::new(con);
+        let con = WsFramed::accept(con).await.unwrap();
+        let con = rw_stream_sink::RwStreamSink::new(con);
+        let _con = yamux::Connection::new(
+            con,
+            Default::default(),
+            yamux::Mode::Server,
+        );
         //handle_tls_con(con);
     });
 }
 
 fn handle_con_cli(con: tokio::net::TcpStream) {
     tokio::task::spawn(async move {
-        let config = dev_utils::trusting_client_config();
+        let config = tls::trusting_client_config();
         let name = "localhost".try_into().unwrap();
-        let _con: tokio_rustls::TlsStream<tokio::net::TcpStream> =
+        let con: tokio_rustls::TlsStream<tokio::net::TcpStream> =
             config.connect(name, con).await.unwrap().into();
-        /*
-        let (con, _) = tokio_tungstenite::client_async("wss://localhost", con)
-            .await
-            .unwrap();
-        */
-        //let _con = WsStream::connect(con);
-        //let con = WsFramed::new(con);
+        let con = WsFramed::connect(con).await.unwrap();
+        let con = rw_stream_sink::RwStreamSink::new(con);
+        let _con = yamux::Connection::new(
+            con,
+            Default::default(),
+            yamux::Mode::Client,
+        );
         //handle_tls_con(con);
     });
 }
@@ -67,3 +71,4 @@ async fn smoke_test() {
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 }
+*/
