@@ -2,6 +2,7 @@
 
 use crate::*;
 use once_cell::sync::Lazy;
+use sha2::Digest;
 use std::sync::Arc;
 
 /// The well-known CA keypair in plaintext pem format.
@@ -129,11 +130,25 @@ static KEY_LOG: Lazy<Arc<dyn rustls::KeyLog>> =
 
 /// Tls server configuration
 #[derive(Clone)]
-pub struct TlsServer(pub(crate) Arc<rustls::ServerConfig>);
+pub struct TlsServer(pub(crate) Arc<rustls::ServerConfig>, Arc<[u8; 32]>);
+
+impl TlsServer {
+    /// Get the sha256 hash of the TLS certificate representing this server
+    pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
+        &self.1
+    }
+}
 
 /// Tls client configuration
 #[derive(Clone)]
-pub struct TlsClient(pub(crate) Arc<rustls::ClientConfig>);
+pub struct TlsClient(pub(crate) Arc<rustls::ClientConfig>, Arc<[u8; 32]>);
+
+impl TlsClient {
+    /// Get the sha256 hash of the TLS certificate representing this client
+    pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
+        &self.1
+    }
+}
 
 impl Config {
     /// Build rustls server / client from config
@@ -142,6 +157,10 @@ impl Config {
             Some(r) => r,
             None => gen_cert()?,
         };
+
+        let mut digest = sha2::Sha256::new();
+        digest.update(&cert);
+        let digest: Arc<[u8; 32]> = Arc::new(digest.finalize().into());
 
         let cert = rustls::Certificate(cert);
         let pk = rustls::PrivateKey(pk);
@@ -170,7 +189,7 @@ impl Config {
         for alpn in self.alpn.iter() {
             srv.alpn_protocols.push(alpn.clone());
         }
-        let srv = TlsServer(Arc::new(srv));
+        let srv = TlsServer(Arc::new(srv), digest.clone());
 
         let mut cli = rustls::ClientConfig::builder()
             .with_cipher_suites(self.cipher_suites.as_slice())
@@ -189,7 +208,7 @@ impl Config {
         for alpn in self.alpn.iter() {
             cli.alpn_protocols.push(alpn.clone());
         }
-        let cli = TlsClient(Arc::new(cli));
+        let cli = TlsClient(Arc::new(cli), digest);
 
         Ok((srv, cli))
     }

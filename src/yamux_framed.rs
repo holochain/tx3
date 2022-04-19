@@ -1,4 +1,4 @@
-//! Message framing based on `yamux` to prevent head-of-line blocking
+//! Message framing based on `yamux` to mitigate head-of-line blocking
 
 use crate::*;
 use futures::future::BoxFuture;
@@ -8,33 +8,37 @@ use std::future::Future;
 use std::sync::Arc;
 
 const MAX_CONCURRENT_TX: usize = 5;
+const MAX_MSG_SIZE: u64 = 64 << 20;
 
-/// Message framing/muxing based on `yamux` to prevent head-of-line blocking
+/// Message framing/muxing based on `yamux` to mitigate head-of-line blocking
 pub fn yamux_framed_cli<S>(socket: S) -> (YamuxFramedSend, YamuxFramedRecv)
 where
     S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let socket =
-        yamux::Connection::new(socket, Default::default(), yamux::Mode::Client);
-    new_yamux(socket)
+    new_yamux(socket, yamux::Mode::Client)
 }
 
-/// Message framing/muxing based on `yamux` to prevent head-of-line blocking
+/// Message framing/muxing based on `yamux` to mitigate head-of-line blocking
 pub fn yamux_framed_srv<S>(socket: S) -> (YamuxFramedSend, YamuxFramedRecv)
 where
     S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let socket =
-        yamux::Connection::new(socket, Default::default(), yamux::Mode::Server);
-    new_yamux(socket)
+    new_yamux(socket, yamux::Mode::Server)
 }
 
 fn new_yamux<S>(
-    mut socket: yamux::Connection<S>,
+    socket: S,
+    mode: yamux::Mode,
 ) -> (YamuxFramedSend, YamuxFramedRecv)
 where
     S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let mut config = yamux::Config::default();
+    // incoming and outgoing
+    config.set_max_num_streams(MAX_CONCURRENT_TX * 2);
+
+    let mut socket = yamux::Connection::new(socket, config, mode);
+
     let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TX));
     let control = socket.control();
     let (s, r) =
@@ -90,6 +94,11 @@ impl YamuxFramedSend {
             Ok(())
         }
     }
+
+    /// Close this connection
+    pub async fn close(mut self) -> Result<()> {
+        self.control.close().await.map_err(other_err)
+    }
 }
 
 type SFut = BoxFuture<'static, Result<Vec<u8>>>;
@@ -111,8 +120,8 @@ impl YamuxFramedRecv {
                     Some(res) => {
                         let f: SFut = Box::pin(async move {
                             use futures::AsyncReadExt;
-                            // TODO - FIXME - limit max message size
-                            let mut res = res?;
+                            let res = res?;
+                            let mut res = AsyncReadExt::take(res, MAX_MSG_SIZE);
                             let mut out = Vec::new();
                             res.read_to_end(&mut out).await?;
                             Ok(out)

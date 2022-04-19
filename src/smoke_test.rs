@@ -1,3 +1,23 @@
+use crate::*;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_test() {
+    let (ep1, _recv1) = tx3_endpoint(Default::default()).await.unwrap();
+    let addr1 = ep1.bound_urls().await.unwrap().remove(0);
+    println!("ep1 addr: {}", addr1);
+
+    let (ep2, _recv2) = tx3_endpoint(Default::default()).await.unwrap();
+    let addr2 = ep2.bound_urls().await.unwrap().remove(0);
+    println!("ep2 addr: {}", addr2);
+
+    let Tx3Remote {
+        cert_digest: con_cert_1,
+        send: _,
+        recv: _,
+    } = ep1.connect(addr2).await.unwrap();
+    println!("con cert1: {:?}", con_cert_1);
+}
+
 /*
 use crate::ws_framed::*;
 use crate::*;

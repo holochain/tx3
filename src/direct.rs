@@ -4,12 +4,28 @@ use crate::tls::*;
 use crate::ws_framed::*;
 use crate::*;
 use rw_stream_sink::*;
+use sha2::Digest;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use tokio::net::*;
 use tokio_rustls::*;
+
+fn cert_digest(con: &TlsStream<TcpStream>) -> Result<Arc<[u8; 32]>> {
+    let chain = match con.get_ref().1.peer_certificates() {
+        None => return Err(other_err("InvalidTlsCert")),
+        Some(c) => c,
+    };
+    if chain.is_empty() {
+        return Err(other_err("InvalidTlsCert"));
+    }
+    let mut digest = sha2::Sha256::new();
+    digest.update(&chain[0].0);
+    let digest: Arc<[u8; 32]> = Arc::new(digest.finalize().into());
+    Ok(digest)
+}
 
 /// Direct system stream type.
 ///
@@ -18,7 +34,10 @@ pub struct DirectStream(RwStreamSink<WsFramed<TlsStream<TcpStream>>>);
 
 impl DirectStream {
     /// Establish a direct outgoing connection
-    pub async fn connect(addr: SocketAddr, tls: TlsClient) -> Result<Self> {
+    pub async fn connect(
+        addr: SocketAddr,
+        tls: TlsClient,
+    ) -> Result<(Arc<[u8; 32]>, Self)> {
         // -- tcp -- //
         let con = TcpStream::connect(addr).await?;
 
@@ -28,12 +47,14 @@ impl DirectStream {
         let con = tls.connect(name, con).await?;
         let con: TlsStream<_> = con.into();
 
+        let cert = cert_digest(&con)?;
+
         // -- ws -- //
         let con = WsFramed::connect(con).await?;
         let con = RwStreamSink::new(con);
 
         // -- result -- //
-        Ok(Self(con))
+        Ok((cert, Self(con)))
     }
 }
 
@@ -82,7 +103,7 @@ pub struct DirectIncoming(TcpStream, TlsAcceptor);
 
 impl DirectIncoming {
     /// Accept this incoming stream seed
-    pub async fn accept(self) -> Result<DirectStream> {
+    pub async fn accept(self) -> Result<(Arc<[u8; 32]>, DirectStream)> {
         // -- tcp -- //
         let Self(con, tls) = self;
 
@@ -90,12 +111,14 @@ impl DirectIncoming {
         let con = tls.accept(con).await?;
         let con: TlsStream<_> = con.into();
 
+        let cert = cert_digest(&con)?;
+
         // -- ws -- //
         let con = WsFramed::accept(con).await?;
         let con = RwStreamSink::new(con);
 
         // -- result -- //
-        Ok(DirectStream(con))
+        Ok((cert, DirectStream(con)))
     }
 }
 
@@ -105,6 +128,11 @@ impl DirectIncoming {
 pub struct DirectListener(TcpListener, TlsAcceptor);
 
 impl DirectListener {
+    /// The local address currently bound
+    pub fn local_addr(&self) -> Result<Vec<SocketAddr>> {
+        crate::addr::upgrade_addr(self.0.local_addr()?)
+    }
+
     /// Bind a new direct listener
     pub async fn bind(addr: SocketAddr, tls: TlsServer) -> Result<Self> {
         let tls = tls.0.into();
