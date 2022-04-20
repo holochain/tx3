@@ -41,8 +41,9 @@ where
 
     let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TX));
     let control = socket.control();
-    let (s, r) =
-        tokio::sync::mpsc::channel::<Result<yamux::Stream>>(MAX_CONCURRENT_TX);
+    let (s, r) = tokio::sync::mpsc::channel::<Result<yamux::Stream>>(
+        MAX_CONCURRENT_TX * 2,
+    );
 
     tokio::task::spawn(async move {
         loop {
@@ -59,8 +60,13 @@ where
                         Ok(()) => (),
                         Err(tokio::sync::mpsc::error::TrySendError::Full(
                             _,
-                        )) => (),
-                        Err(_) => break,
+                        )) => {
+                            eprintln!("dropping yamux_framed msg");
+                        }
+                        Err(err) => {
+                            eprintln!("yamux_framed recv shutdown: {:?}", err);
+                            break;
+                        }
                     }
                 }
             }
@@ -90,6 +96,7 @@ impl YamuxFramedSend {
             let _g = limit.acquire().await;
             let mut stream = control.open_stream().await.map_err(other_err)?;
             stream.write_all(&data).await?;
+            stream.flush().await?;
             stream.close().await?;
             Ok(())
         }

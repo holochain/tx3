@@ -4,6 +4,8 @@ use crate::*;
 use once_cell::sync::Lazy;
 use sha2::Digest;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::*;
 
 /// The well-known CA keypair in plaintext pem format.
 /// Some TLS clients require CA roots to validate client-side certificates.
@@ -133,9 +135,25 @@ static KEY_LOG: Lazy<Arc<dyn rustls::KeyLog>> =
 pub struct TlsServer(pub(crate) Arc<rustls::ServerConfig>, Arc<[u8; 32]>);
 
 impl TlsServer {
+    /// yo
+    pub fn to_s2n(&self) -> s2n_quic::provider::tls::rustls::Server {
+        s2n_quic::provider::tls::rustls::Server::new((*self.0).clone())
+    }
+
     /// Get the sha256 hash of the TLS certificate representing this server
     pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
         &self.1
+    }
+
+    /// Wrap an incoming (server) stream with TLS encryption
+    pub async fn accept<S>(&self, stream: S) -> Result<TlsStream<S>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        Ok(TlsAcceptor::from(self.0.clone())
+            .accept(stream)
+            .await?
+            .into())
     }
 }
 
@@ -144,9 +162,26 @@ impl TlsServer {
 pub struct TlsClient(pub(crate) Arc<rustls::ClientConfig>, Arc<[u8; 32]>);
 
 impl TlsClient {
+    /// yo
+    pub fn to_s2n(&self) -> s2n_quic::provider::tls::rustls::Client {
+        s2n_quic::provider::tls::rustls::Client::new((*self.0).clone())
+    }
+
     /// Get the sha256 hash of the TLS certificate representing this client
     pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
         &self.1
+    }
+
+    /// Wrap an outgoing (client) stream with TLS encryption
+    pub async fn connect<S>(&self, stream: S) -> Result<TlsStream<S>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let name = "stub".try_into().unwrap();
+        Ok(TlsConnector::from(self.0.clone())
+            .connect(name, stream)
+            .await?
+            .into())
     }
 }
 

@@ -10,12 +10,14 @@ async fn smoke_test() {
     let addr2 = ep2.bound_urls().await.unwrap().remove(0);
     println!("ep2 addr: {}", addr2);
 
+    /*
     let Tx3Remote {
         cert_digest: con_cert_1,
         send: _,
         recv: _,
     } = ep1.connect(addr2).await.unwrap();
     println!("con cert1: {:?}", con_cert_1);
+    */
 }
 
 /*

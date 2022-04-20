@@ -10,6 +10,32 @@ fn default_tcp_bind() -> Url {
 const TX3_STACK_FWST: &str = "fwst";
 const TX3_STACK_FSPWST: &str = "fspwst";
 
+/// A configuration instance for a layer in a tx3 stack
+pub trait AsTx3Config: 'static + Send + erased_serde::Serialize {}
+
+#[cfg(test)]
+mod new_cfg_tests {
+    use super::*;
+
+    #[test]
+    fn new_cfg() {
+        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct XTcpConf {
+            // -- TCP -- //
+            #[serde(default = "default_tcp_bind")]
+            pub(crate) tcp_bind: Url,
+        }
+
+        impl AsTx3Config for XTcpConf {}
+
+        let conf = XTcpConf {
+            tcp_bind: Url::parse("tcp://0.0.0.0:0").unwrap(),
+        };
+        let _conf: Box<dyn AsTx3Config> = Box::new(conf);
+    }
+}
+
 /// The Tx3 stack to build. Higher-level items to the left,
 /// lower-level items to the right. E.g. tls over tcp would be `"st"`.
 ///
