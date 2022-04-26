@@ -12,15 +12,19 @@ pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
 
 use std::io::Result;
 
-pub mod addr;
-pub mod config;
-pub mod direct;
-pub mod tls;
-pub mod ws_framed;
-pub mod yamux_framed;
+mod addr;
+pub use addr::*;
 
-mod tx3_endpoint;
-pub use tx3_endpoint::*;
+mod config;
+pub use config::*;
+
+pub mod tls;
+
+mod connection;
+pub use connection::*;
+
+mod node;
+pub use node::*;
 
 #[cfg(test)]
-pub mod smoke_test;
+mod smoke_test;

@@ -4,7 +4,6 @@ use crate::*;
 use once_cell::sync::Lazy;
 use sha2::Digest;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::*;
 
 /// The well-known CA keypair in plaintext pem format.
@@ -50,8 +49,17 @@ static WK_CA_CERT_DER: Lazy<Arc<Vec<u8>>> = Lazy::new(|| {
     Arc::new(cert)
 });
 
+/// Sha256 digest of DER encoded tls certificate
+pub type TlsCertDigest = Arc<[u8; 32]>;
+
+/// DER encoded tls certificate
+pub struct TlsCertDer(pub Box<[u8]>);
+
+/// DER encoded tls private key
+pub struct TlsPkDer(pub Box<[u8]>);
+
 /// Generate a new der-encoded tls certificate and private key
-pub fn gen_cert() -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn gen_cert_pair() -> Result<(TlsCertDer, TlsPkDer)> {
     let sni = format!("a{}a.a{}a", nanoid::nanoid!(), nanoid::nanoid!());
 
     let mut params = rcgen::CertificateParams::new(vec![sni.clone()]);
@@ -80,20 +88,27 @@ pub fn gen_cert() -> Result<(Vec<u8>, Vec<u8>)> {
         .serialize_der_with_signer(root_cert)
         .map_err(other_err)?;
 
-    Ok((cert_der, priv_key))
+    Ok((
+        TlsCertDer(cert_der.into_boxed_slice()),
+        TlsPkDer(priv_key.into_boxed_slice()),
+    ))
 }
 
-/// TLS Configuration
-pub struct Config {
+/// Single shared keylog file all sessions can report to
+static KEY_LOG: Lazy<Arc<dyn rustls::KeyLog>> =
+    Lazy::new(|| Arc::new(rustls::KeyLogFile::new()));
+
+/// TLS configuration builder
+pub struct TlsConfigBuilder {
     alpn: Vec<Vec<u8>>,
-    cert: Option<(Vec<u8>, Vec<u8>)>,
+    cert: Option<(TlsCertDer, TlsPkDer)>,
     cipher_suites: Vec<rustls::SupportedCipherSuite>,
     protocol_versions: Vec<&'static rustls::SupportedProtocolVersion>,
     key_log: bool,
     session_storage: usize,
 }
 
-impl Default for Config {
+impl Default for TlsConfigBuilder {
     fn default() -> Self {
         Self {
             alpn: Vec::new(),
@@ -109,7 +124,7 @@ impl Default for Config {
     }
 }
 
-impl Config {
+impl TlsConfigBuilder {
     /// Push an alpn protocol to use with this connection. If none are
     /// set, alpn negotiotion will not happen. Otherwise, specify the
     /// most preferred protocol first
@@ -120,85 +135,32 @@ impl Config {
 
     /// Set the certificate / private key to use with this TLS config.
     /// If not set, a new certificate and private key will be generated
-    pub fn with_cert(mut self, cert_der: Vec<u8>, pk_der: Vec<u8>) -> Self {
-        self.cert = Some((cert_der, pk_der));
+    pub fn with_cert(mut self, cert: TlsCertDer, pk: TlsPkDer) -> Self {
+        self.cert = Some((cert, pk));
         self
     }
-}
 
-/// Single shared keylog file all sessions can report to
-static KEY_LOG: Lazy<Arc<dyn rustls::KeyLog>> =
-    Lazy::new(|| Arc::new(rustls::KeyLogFile::new()));
-
-/// Tls server configuration
-#[derive(Clone)]
-pub struct TlsServer(pub(crate) Arc<rustls::ServerConfig>, Arc<[u8; 32]>);
-
-impl TlsServer {
-    /// yo
-    pub fn to_s2n(&self) -> s2n_quic::provider::tls::rustls::Server {
-        s2n_quic::provider::tls::rustls::Server::new((*self.0).clone())
+    /// Enable or disable TLS keylogging. Note, even if enabled,
+    /// the standard `SSLKEYLOGFILE` environment variable must
+    /// be present for keys to be written.
+    pub fn with_keylog(mut self, key_log: bool) -> Self {
+        self.key_log = key_log;
+        self
     }
 
-    /// Get the sha256 hash of the TLS certificate representing this server
-    pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
-        &self.1
-    }
-
-    /// Wrap an incoming (server) stream with TLS encryption
-    pub async fn accept<S>(&self, stream: S) -> Result<TlsStream<S>>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-    {
-        Ok(TlsAcceptor::from(self.0.clone())
-            .accept(stream)
-            .await?
-            .into())
-    }
-}
-
-/// Tls client configuration
-#[derive(Clone)]
-pub struct TlsClient(pub(crate) Arc<rustls::ClientConfig>, Arc<[u8; 32]>);
-
-impl TlsClient {
-    /// yo
-    pub fn to_s2n(&self) -> s2n_quic::provider::tls::rustls::Client {
-        s2n_quic::provider::tls::rustls::Client::new((*self.0).clone())
-    }
-
-    /// Get the sha256 hash of the TLS certificate representing this client
-    pub fn cert_digest(&self) -> &Arc<[u8; 32]> {
-        &self.1
-    }
-
-    /// Wrap an outgoing (client) stream with TLS encryption
-    pub async fn connect<S>(&self, stream: S) -> Result<TlsStream<S>>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-    {
-        let name = "stub".try_into().unwrap();
-        Ok(TlsConnector::from(self.0.clone())
-            .connect(name, stream)
-            .await?
-            .into())
-    }
-}
-
-impl Config {
-    /// Build rustls server / client from config
-    pub fn build(self) -> Result<(TlsServer, TlsClient)> {
+    /// Finalize/build a TlsConfig from this builder
+    pub fn build(self) -> Result<TlsConfig> {
         let (cert, pk) = match self.cert {
             Some(r) => r,
-            None => gen_cert()?,
+            None => gen_cert_pair()?,
         };
 
         let mut digest = sha2::Sha256::new();
-        digest.update(&cert);
+        digest.update(&cert.0);
         let digest: Arc<[u8; 32]> = Arc::new(digest.finalize().into());
 
-        let cert = rustls::Certificate(cert);
-        let pk = rustls::PrivateKey(pk);
+        let cert = rustls::Certificate(cert.0.into_vec());
+        let pk = rustls::PrivateKey(pk.0.into_vec());
 
         let root_cert = rustls::Certificate(WK_CA_CERT_DER.to_vec());
         let mut root_store = rustls::RootCertStore::empty();
@@ -224,7 +186,6 @@ impl Config {
         for alpn in self.alpn.iter() {
             srv.alpn_protocols.push(alpn.clone());
         }
-        let srv = TlsServer(Arc::new(srv), digest.clone());
 
         let mut cli = rustls::ClientConfig::builder()
             .with_cipher_suites(self.cipher_suites.as_slice())
@@ -243,9 +204,33 @@ impl Config {
         for alpn in self.alpn.iter() {
             cli.alpn_protocols.push(alpn.clone());
         }
-        let cli = TlsClient(Arc::new(cli), digest);
 
-        Ok((srv, cli))
+        Ok(TlsConfig {
+            srv: Arc::new(srv),
+            cli: Arc::new(cli),
+            digest,
+        })
+    }
+}
+
+/// A fully configured tls p2p session state instance
+#[derive(Clone)]
+pub struct TlsConfig {
+    pub(crate) srv: Arc<rustls::ServerConfig>,
+    #[allow(dead_code)]
+    pub(crate) cli: Arc<rustls::ClientConfig>,
+    digest: TlsCertDigest,
+}
+
+impl TlsConfig {
+    /// Builder for generating TlsConfig instances
+    pub fn builder() -> TlsConfigBuilder {
+        TlsConfigBuilder::default()
+    }
+
+    /// Get the sha256 hash of the TLS certificate representing this server
+    pub fn cert_digest(&self) -> &TlsCertDigest {
+        &self.digest
     }
 }
 

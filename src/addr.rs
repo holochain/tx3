@@ -1,13 +1,63 @@
 //! addr utilities
 
-use crate::config::*;
 use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 
-/// A url representing a tx3 p2p endpoint
+/// Tx3 url schemes, see Tx3Url for more details
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Tx3Scheme<'a> {
+    /// `tx3-st` - direct TLS over TCP stream socket
+    Tx3st,
+
+    /// `tx3-rst` - relayed TLS over TCP
+    Tx3rst,
+
+    /// Other tx3 scheme not handled by this implementation
+    Other(&'a str),
+}
+
+impl Tx3Scheme<'_> {
+    /// Get the scheme as a &str
+    pub fn as_str(&self) -> &str {
+        match self {
+            Tx3Scheme::Tx3st => "tx3-st",
+            Tx3Scheme::Tx3rst => "tx3-rst",
+            Tx3Scheme::Other(s) => s,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for Tx3Scheme<'a> {
+    fn from(s: &'a str) -> Self {
+        match s {
+            "tx3-st" => Tx3Scheme::Tx3st,
+            "tx3-rst" => Tx3Scheme::Tx3rst,
+            oth => Tx3Scheme::Other(oth),
+        }
+    }
+}
+
+/// A url representing a tx3 p2p endpoint.
+///
+/// Example binding urls:
+///
+/// - `tx3-st://0.0.0.0:0` - bind to all interfaces, os-determined port
+/// - `tx3-rst://relay.holo.host:12345/relay_cert_digest` - bind as a
+///   relay client to a relay hosted at the given host/port using a tls
+///   cert with the given sha256 digest (base64url encoded with no pad)
+/// - `tx3-rst://1.1.1.1:12345` - an rst binding request without an
+///   explicit tls cert will bind itself as a relay server
+///
+/// Example addressable urls after binding:
+///
+/// - `tx3-st://1.1.1.1:12345/my_node_cert` - reachable at host/port
+///   with the given node tls cert sha256 digest (base64url encoded no pad)
+/// - `tx3-rst://relay.holo.host:12345/my_node_cert` - reachable via relay
+///   with the node cert instead of the relay cert
 #[derive(
     Clone,
     serde::Serialize,
@@ -39,45 +89,37 @@ impl From<Tx3Url> for url::Url {
     }
 }
 
+impl From<&str> for Tx3Url {
+    fn from(s: &str) -> Self {
+        Tx3Url::new(url::Url::parse(s).expect("invalid tx3 url"))
+    }
+}
+
 impl Tx3Url {
     /// Construct & verify a tx3 url
     pub fn new(url: url::Url) -> Self {
-        if url.scheme() != "tx3" {
-            panic!("tx3 url scheme must = 'tx3'");
-        }
         url.host_str().expect("tx3 url must include a host");
         url.port().expect("tx3 url must include a port");
-        {
-            let mut i = url.path_segments().expect("no stack in tx3 url");
-            let stack = i.next().expect("no stack in tx3 url");
-            match Tx3Stack::from(stack) {
-                Tx3Stack::Fwst => {
-                    i.next().expect("no tls cert digest in fwst tx3 url");
-                }
-                oth => panic!("unhandle tx3 stack: {:?}", oth),
-            }
-        }
         Self(url)
     }
 
-    /// Read the tx3 stack config from the url
-    pub fn stack(&self) -> (Tx3Stack, std::str::Split<'_, char>) {
-        let mut i = self.0.path_segments().unwrap();
-        (Tx3Stack::from(i.next().unwrap()), i)
+    /// Read the tx3 scheme from the url
+    pub fn scheme(&self) -> Tx3Scheme<'_> {
+        self.0.scheme().into()
     }
 
     /// Translate this tx3 url into a socket addr we can use to
     /// attempt a connection
-    pub async fn socket_addr(&self) -> Result<SocketAddr> {
+    pub(crate) async fn socket_addrs(
+        &self,
+    ) -> Result<impl Iterator<Item = SocketAddr>> {
         tokio::net::lookup_host(format!(
             "{}:{}",
             self.0.host_str().unwrap(),
             self.0.port().unwrap(),
         ))
         .await
-        .map_err(other_err)?
-        .next()
-        .ok_or_else(|| other_err("invalid tx3 url"))
+        .map_err(other_err)
     }
 }
 
