@@ -1,5 +1,8 @@
 //! addr utilities
 
+// many of these are coppied from the nightly std library, don't want to muck
+#![allow(clippy::nonminimal_bool)]
+
 use crate::tls::*;
 use crate::*;
 use std::net::IpAddr;

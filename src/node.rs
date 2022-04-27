@@ -233,8 +233,10 @@ async fn bind_tx3_st(
                 }
             };
 
-            if let Err(_) =
-                con_send.send(Tx3InboundAccept { inner: ib_fut }).await
+            if con_send
+                .send(Tx3InboundAccept { inner: ib_fut })
+                .await
+                .is_err()
             {
                 break;
             }
@@ -296,8 +298,10 @@ async fn bind_tx3_rst_inner(
                 splice_token: Arc::new(splice_token),
             });
 
-            if let Err(_) =
-                con_send.send(Tx3InboundAccept { inner: ib_fut }).await
+            if con_send
+                .send(Tx3InboundAccept { inner: ib_fut })
+                .await
+                .is_err()
             {
                 break;
             }

@@ -1,11 +1,14 @@
 //! Tx3 configuration
 
+// sometimes it's clearer to do it yourself clippy...
+#![allow(clippy::derivable_impls)]
+
 use crate::tls::*;
 use crate::*;
 
 /// Tx3 configuration
 #[non_exhaustive]
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tx3Config {
     /// The list of bindings we should attempt for addressablility by
@@ -16,6 +19,7 @@ pub struct Tx3Config {
     ///
     /// - `tx3-st` for binding to local tcp network interfaces
     /// - `tx3-rst` for binding through a remote relay tcp splicer
+    #[serde(default)]
     pub bind: Vec<Tx3Url>,
 
     /// TLS configuration for this node. This will never be serialized
@@ -24,6 +28,15 @@ pub struct Tx3Config {
     /// If not specified a default / ephemeral tls config will be generated.
     #[serde(skip)]
     pub tls: Option<TlsConfig>,
+}
+
+impl Default for Tx3Config {
+    fn default() -> Self {
+        Self {
+            bind: Vec::new(),
+            tls: None,
+        }
+    }
 }
 
 impl Tx3Config {

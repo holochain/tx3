@@ -1,9 +1,9 @@
 use criterion::*;
+use futures::future::try_join_all;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tx3::*;
-use futures::future::try_join_all;
 
 const COUNT: usize = 3;
 
@@ -39,11 +39,7 @@ impl BenchControl {
     }
 
     pub async fn test(self) -> Self {
-        let Self {
-            data,
-            send,
-            recv,
-        } = self;
+        let Self { data, send, recv } = self;
 
         let mut recv_tasks = Vec::with_capacity(COUNT);
         for mut recv in recv {
@@ -106,19 +102,11 @@ impl BenchTx3st {
 
         let recv = recv.await.unwrap();
 
-        Self {
-            data,
-            recv,
-            send,
-        }
+        Self { data, recv, send }
     }
 
     pub async fn test(self) -> Self {
-        let Self {
-            data,
-            recv,
-            send,
-        } = self;
+        let Self { data, recv, send } = self;
 
         let mut recv_tasks = Vec::with_capacity(COUNT);
         for mut recv in recv {
@@ -144,11 +132,7 @@ impl BenchTx3st {
         let recv = try_join_all(recv_tasks).await.unwrap();
         let send = try_join_all(send_tasks).await.unwrap();
 
-        Self {
-            data,
-            recv,
-            send,
-        }
+        Self { data, recv, send }
     }
 }
 
@@ -161,18 +145,17 @@ struct BenchTx3rst {
 impl BenchTx3rst {
     pub async fn new(data: Arc<[u8]>) -> Self {
         let relay = Tx3Relay::new(
-            Tx3Config::default().with_bind("tx3-rst://127.0.0.1:0"),
+            Tx3RelayConfig::default().with_bind("tx3-rst://127.0.0.1:0"),
         )
         .await
         .unwrap();
 
         let r_addr = relay.local_addrs()[0].to_owned();
 
-        let (r_ep, mut recv) = Tx3Node::new(
-            Tx3Config::default().with_bind(r_addr),
-        )
-        .await
-        .unwrap();
+        let (r_ep, mut recv) =
+            Tx3Node::new(Tx3Config::default().with_bind(r_addr))
+                .await
+                .unwrap();
 
         let addr = r_ep.local_addrs()[0].to_owned();
 
@@ -193,19 +176,11 @@ impl BenchTx3rst {
 
         let recv = recv.await.unwrap();
 
-        Self {
-            data,
-            recv,
-            send,
-        }
+        Self { data, recv, send }
     }
 
     pub async fn test(self) -> Self {
-        let Self {
-            data,
-            recv,
-            send,
-        } = self;
+        let Self { data, recv, send } = self;
 
         let mut recv_tasks = Vec::with_capacity(COUNT);
         for mut recv in recv {
@@ -231,11 +206,7 @@ impl BenchTx3rst {
         let recv = try_join_all(recv_tasks).await.unwrap();
         let send = try_join_all(send_tasks).await.unwrap();
 
-        Self {
-            data,
-            recv,
-            send,
-        }
+        Self { data, recv, send }
     }
 }
 
