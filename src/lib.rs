@@ -12,6 +12,8 @@ pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
 
 use std::io::Result;
 
+pub(crate) mod tcp;
+
 mod addr;
 pub use addr::*;
 

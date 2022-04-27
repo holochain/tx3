@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 /// A tx3-rst relay server
 pub struct Tx3Relay {
@@ -93,6 +94,13 @@ async fn bind_tx3_rst(
                     // TODO FIXME TRACING
                 }
                 Ok((socket, _addr)) => {
+                    let socket = match crate::tcp::tx3_tcp_configure(socket) {
+                        Err(_err) => {
+                            // TODO FIXME TRACING
+                            continue;
+                        }
+                        Ok(socket) => socket,
+                    };
                     tokio::task::spawn(process_socket(
                         config.clone(),
                         socket,
@@ -106,13 +114,14 @@ async fn bind_tx3_rst(
     Ok(out)
 }
 
-enum ControlCmd {}
+enum ControlCmd {
+    NotifyPending(Arc<[u8; 32]>),
+}
 
 struct RelayState {
     control_channels:
         HashMap<TlsCertDigest, tokio::sync::mpsc::Sender<ControlCmd>>,
-    pending_tokens:
-        HashMap<Arc<[u8; 32]>, ()>,
+    pending_tokens: HashMap<Arc<[u8; 32]>, tokio::net::TcpStream>,
 }
 
 impl RelayState {
@@ -172,6 +181,13 @@ async fn process_socket_err(
         return process_relay_control(config, socket, state).await;
     }
 
+    let mut splice_token = [0; 32];
+    use ring::rand::SecureRandom;
+    ring::rand::SystemRandom::new()
+        .fill(&mut splice_token[..])
+        .map_err(|_| other_err("SystemRandomFailure"))?;
+    let splice_token = Arc::new(splice_token);
+
     enum TokenRes {
         /// we host a control with this cert digest
         /// send the control a message about the incoming connection
@@ -179,31 +195,39 @@ async fn process_socket_err(
 
         /// we have this connection token in our store,
         /// splice the connections together
-        HaveConToken,
+        HaveConToken(tokio::net::TcpStream, tokio::net::TcpStream),
 
         /// we do not recognize this token, drop the socket
         Unknown,
     }
 
-    let res = state.access(|state| {
-        if let Some(snd) = state.control_channels.get(&token) {
-            // TODO - generate a random token (outside the access??)
-            //        and set it, for handling incoming requests
-            TokenRes::HaveControl(snd.clone())
-        } else if let Some(_) = state.pending_tokens.remove(&token) {
-            TokenRes::HaveConToken
-        } else {
-            TokenRes::Unknown
-        }
-    });
+    let res = {
+        let splice_token = splice_token.clone();
+        state.access(move |state| {
+            if let Some(snd) = state.control_channels.get(&token) {
+                state.pending_tokens.insert(splice_token, socket);
+                TokenRes::HaveControl(snd.clone())
+            } else if let Some(socket2) = state.pending_tokens.remove(&token) {
+                TokenRes::HaveConToken(socket, socket2)
+            } else {
+                drop(socket);
+                TokenRes::Unknown
+            }
+        })
+    };
 
     match res {
-        TokenRes::Unknown => {
-            drop(socket);
+        TokenRes::Unknown => (), // do nothing / the socket has been dropped
+        TokenRes::HaveControl(snd) => {
+            // we stored the socket in the pending map
+            // notify the control stream of the pending connection
+            let _ = snd.send(ControlCmd::NotifyPending(splice_token)).await;
         }
-        TokenRes::HaveControl(_snd) => {
-        }
-        TokenRes::HaveConToken => {
+        TokenRes::HaveConToken(mut socket, mut socket2) => {
+            // splice the two sockets together
+            // MAYBE: look into optimization on linux using
+            //        https://man7.org/linux/man-pages/man2/splice.2.html
+            tokio::io::copy_bidirectional(&mut socket, &mut socket2).await?;
         }
     }
 
@@ -246,13 +270,35 @@ async fn process_relay_control(
 }
 
 async fn process_relay_control_inner(
-    _socket: Tx3Connection,
+    socket: Tx3Connection,
     _state: RelayStateSync,
     mut ctrl_recv: tokio::sync::mpsc::Receiver<ControlCmd>,
 ) -> Result<()> {
-    while let Some(cmd) = ctrl_recv.recv().await {
-        match cmd {}
-    }
+    let (mut read, mut write) = tokio::io::split(socket);
 
-    Ok(())
+    tokio::select! {
+        // read side - it is an error to send any data to the read side
+        //             of a control connection
+        _ = async move {
+            let mut buf = [0];
+            read.read_exact(&mut buf).await?;
+            Result::Ok(())
+        } => {
+            Err(other_err("ControlReadData"))
+        }
+
+        // write side - write data to the control connection
+        _ = async move {
+            while let Some(cmd) = ctrl_recv.recv().await {
+                match cmd {
+                    ControlCmd::NotifyPending(splice_token) => {
+                        write.write_all(&splice_token[..]).await?;
+                    }
+                }
+            }
+            Result::Ok(())
+        } => {
+            Ok(())
+        }
+    }
 }

@@ -94,6 +94,12 @@ impl From<&str> for Tx3Url {
     }
 }
 
+impl From<&Tx3Url> for Tx3Url {
+    fn from(u: &Tx3Url) -> Self {
+        u.clone()
+    }
+}
+
 impl Tx3Url {
     /// Construct & verify a tx3 url
     pub fn new(url: url::Url) -> Self {
@@ -118,6 +124,13 @@ impl Tx3Url {
         }
 
         None
+    }
+
+    /// Generate a new tx3 url with a specific tls cert digest
+    pub fn with_cert_digest(&self, cert_digest: &TlsCertDigest) -> Self {
+        let mut u = self.0.clone();
+        u.set_path(&tls_cert_digest_b64_enc(cert_digest));
+        Self(u)
     }
 
     /// Translate this tx3 url into a socket addr we can use to
