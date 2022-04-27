@@ -30,3 +30,7 @@ all-features = true
 
 [features]
 default = []
+
+[[bench]]
+name = "main"
+harness = false
