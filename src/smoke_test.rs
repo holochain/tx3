@@ -28,3 +28,13 @@ async fn smoke_test_st() {
 
     rtask.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_test_rst() {
+    let relay =
+        Tx3Relay::new(Tx3Config::default().with_bind("tx3-rst://127.0.0.1:0"))
+            .await
+            .unwrap();
+    let addr_r = relay.local_addrs()[0].to_owned();
+    println!("got addr_r: {}", addr_r);
+}

@@ -53,8 +53,10 @@ pub struct Tx3Node {
 }
 
 impl Tx3Node {
-    /// Construct a new Tx3Node with given configuration
+    /// Construct/bind a new Tx3Node with given configuration
     pub async fn new(mut config: Tx3Config) -> Result<(Self, Tx3Inbound)> {
+        use futures::future::FutureExt;
+
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
         }
@@ -71,13 +73,19 @@ impl Tx3Node {
             match bind.scheme() {
                 Tx3Scheme::Tx3st => {
                     for addr in bind.socket_addrs().await? {
-                        all_bind.push(bind_tx3_st(
-                            config.clone(),
-                            addr,
-                            con_send.clone(),
-                        ));
+                        all_bind.push(
+                            bind_tx3_st(config.clone(), addr, con_send.clone())
+                                .boxed(),
+                        );
                     }
                 }
+                Tx3Scheme::Tx3rst => match bind.tls_cert_digest() {
+                    None => return Err(other_err("InvalidRstCert")),
+                    Some(_cert_digest) => {
+                        // we are connecting to a remote relay
+                        todo!()
+                    }
+                },
                 oth => {
                     return Err(other_err(format!(
                         "Unsupported Scheme: {}",
@@ -155,10 +163,7 @@ async fn bind_tx3_st(
             url::Url::parse(&format!(
                 "tx3-st://{}/{}",
                 a,
-                base64::encode_config(
-                    &config.priv_tls().cert_digest()[..],
-                    base64::URL_SAFE_NO_PAD
-                ),
+                tls_cert_digest_b64_enc(config.priv_tls().cert_digest()),
             ))
             .map_err(other_err)?,
         ));

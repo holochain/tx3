@@ -26,5 +26,8 @@ pub use connection::*;
 mod node;
 pub use node::*;
 
+mod relay;
+pub use relay::*;
+
 #[cfg(test)]
 mod smoke_test;

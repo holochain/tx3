@@ -1,5 +1,6 @@
 //! addr utilities
 
+use crate::tls::*;
 use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -49,8 +50,6 @@ impl<'a> From<&'a str> for Tx3Scheme<'a> {
 /// - `tx3-rst://relay.holo.host:12345/relay_cert_digest` - bind as a
 ///   relay client to a relay hosted at the given host/port using a tls
 ///   cert with the given sha256 digest (base64url encoded with no pad)
-/// - `tx3-rst://1.1.1.1:12345` - an rst binding request without an
-///   explicit tls cert will bind itself as a relay server
 ///
 /// Example addressable urls after binding:
 ///
@@ -106,6 +105,19 @@ impl Tx3Url {
     /// Read the tx3 scheme from the url
     pub fn scheme(&self) -> Tx3Scheme<'_> {
         self.0.scheme().into()
+    }
+
+    /// Read the certificate digest (if it exists) from the url
+    pub fn tls_cert_digest(&self) -> Option<TlsCertDigest> {
+        if let Some(mut i) = self.0.path_segments() {
+            if let Some(s) = i.next() {
+                if let Ok(d) = tls_cert_digest_b64_dec(s) {
+                    return Some(d);
+                }
+            }
+        }
+
+        None
     }
 
     /// Translate this tx3 url into a socket addr we can use to

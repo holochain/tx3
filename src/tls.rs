@@ -52,6 +52,23 @@ static WK_CA_CERT_DER: Lazy<Arc<Vec<u8>>> = Lazy::new(|| {
 /// Sha256 digest of DER encoded tls certificate
 pub type TlsCertDigest = Arc<[u8; 32]>;
 
+/// decode a base64 encoded tls certificate digest
+pub fn tls_cert_digest_b64_dec(s: &str) -> Result<TlsCertDigest> {
+    let v =
+        base64::decode_config(s, base64::URL_SAFE_NO_PAD).map_err(other_err)?;
+    if v.len() != 32 {
+        return Err(other_err("InvalidTlsCertDigest"));
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(&v);
+    Ok(Arc::new(out))
+}
+
+/// encode a tls certificate digest into base64
+pub fn tls_cert_digest_b64_enc(d: &[u8; 32]) -> String {
+    base64::encode_config(d, base64::URL_SAFE_NO_PAD)
+}
+
 /// DER encoded tls certificate
 pub struct TlsCertDer(pub Box<[u8]>);
 
