@@ -76,7 +76,7 @@ pub struct TlsCertDer(pub Box<[u8]>);
 pub struct TlsPkDer(pub Box<[u8]>);
 
 /// Generate a new der-encoded tls certificate and private key
-pub fn gen_cert_pair() -> Result<(TlsCertDer, TlsPkDer)> {
+pub fn gen_tls_cert_pair() -> Result<(TlsCertDer, TlsPkDer)> {
     let sni = format!("a{}a.a{}a", nanoid::nanoid!(), nanoid::nanoid!());
 
     let mut params = rcgen::CertificateParams::new(vec![sni.clone()]);
@@ -169,7 +169,7 @@ impl TlsConfigBuilder {
     pub fn build(self) -> Result<TlsConfig> {
         let (cert, pk) = match self.cert {
             Some(r) => r,
-            None => gen_cert_pair()?,
+            None => gen_tls_cert_pair()?,
         };
 
         let mut digest = sha2::Sha256::new();

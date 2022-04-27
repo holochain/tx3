@@ -118,7 +118,7 @@ impl Tx3Node {
     }
 
     /// Get the local TLS certificate digest associated with this node
-    pub fn local_cert(&self) -> &TlsCertDigest {
+    pub fn local_tls_cert_digest(&self) -> &TlsCertDigest {
         self.config.priv_tls().cert_digest()
     }
 
@@ -263,9 +263,8 @@ async fn bind_tx3_rst(
         {
             Err(e) => errs.push(e),
             Ok(_) => {
-                return Ok(vec![
-                    relay_url.with_cert_digest(config.priv_tls().cert_digest())
-                ]);
+                return Ok(vec![relay_url
+                    .with_tls_cert_digest(config.priv_tls().cert_digest())]);
             }
         }
     }
@@ -284,7 +283,7 @@ async fn bind_tx3_rst_inner(
     let mut control_socket =
         Tx3Connection::priv_connect(config.priv_tls().clone(), control_socket)
             .await?;
-    if control_socket.remote_cert() != &tgt_cert_digest {
+    if control_socket.remote_tls_cert_digest() != &tgt_cert_digest {
         return Err(other_err("InvalidPeerCert"));
     }
     tokio::task::spawn(async move {

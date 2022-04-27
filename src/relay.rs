@@ -57,7 +57,7 @@ impl Tx3Relay {
     }
 
     /// Get the local TLS certificate digest associated with this relay
-    pub fn local_cert(&self) -> &TlsCertDigest {
+    pub fn local_tls_cert_digest(&self) -> &TlsCertDigest {
         self.config.priv_tls().cert_digest()
     }
 
@@ -242,7 +242,7 @@ async fn process_relay_control(
     let socket =
         Tx3Connection::priv_accept(config.priv_tls().clone(), socket).await?;
 
-    let remote_cert = socket.remote_cert().clone();
+    let remote_cert = socket.remote_tls_cert_digest().clone();
 
     let (ctrl_send, ctrl_recv) = tokio::sync::mpsc::channel(1);
 

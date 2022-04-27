@@ -7,14 +7,14 @@ use std::task::Poll;
 
 /// A Tx3 p2p connection to a remote peer
 pub struct Tx3Connection {
-    remote_cert_digest: TlsCertDigest,
+    remote_tls_cert_digest: TlsCertDigest,
     socket: tokio_rustls::TlsStream<tokio::net::TcpStream>,
 }
 
 impl Tx3Connection {
     /// Get the TLS certificate digest of the remote end of this connection
-    pub fn remote_cert(&self) -> &TlsCertDigest {
-        &self.remote_cert_digest
+    pub fn remote_tls_cert_digest(&self) -> &TlsCertDigest {
+        &self.remote_tls_cert_digest
     }
 
     // -- private -- //
@@ -27,9 +27,9 @@ impl Tx3Connection {
             .accept(socket)
             .await?
             .into();
-        let remote_cert_digest = remote_digest(&socket)?;
+        let remote_tls_cert_digest = hash_cert(&socket)?;
         Ok(Self {
-            remote_cert_digest,
+            remote_tls_cert_digest,
             socket,
         })
     }
@@ -43,9 +43,9 @@ impl Tx3Connection {
             .connect(name, socket)
             .await?
             .into();
-        let remote_cert_digest = remote_digest(&socket)?;
+        let remote_tls_cert_digest = hash_cert(&socket)?;
         Ok(Self {
-            remote_cert_digest,
+            remote_tls_cert_digest,
             socket,
         })
     }
@@ -103,7 +103,7 @@ impl tokio::io::AsyncWrite for Tx3Connection {
     }
 }
 
-fn remote_digest(
+fn hash_cert(
     socket: &tokio_rustls::TlsStream<tokio::net::TcpStream>,
 ) -> Result<TlsCertDigest> {
     let (_, c) = socket.get_ref();

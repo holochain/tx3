@@ -127,7 +127,7 @@ impl Tx3Url {
     }
 
     /// Generate a new tx3 url with a specific tls cert digest
-    pub fn with_cert_digest(&self, cert_digest: &TlsCertDigest) -> Self {
+    pub fn with_tls_cert_digest(&self, cert_digest: &TlsCertDigest) -> Self {
         let mut u = self.0.clone();
         u.set_path(&tls_cert_digest_b64_enc(cert_digest));
         Self(u)
