@@ -84,4 +84,7 @@ mod relay;
 pub use relay::*;
 
 #[cfg(test)]
+mod relay_test;
+
+#[cfg(test)]
 mod smoke_test;

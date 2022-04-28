@@ -53,12 +53,21 @@ impl futures::Stream for Tx3Inbound {
 pub struct Tx3Node {
     config: Arc<Tx3Config>,
     addrs: Vec<Tx3Url>,
+    shutdown: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for Tx3Node {
+    fn drop(&mut self) {
+        self.shutdown.notify_waiters();
+    }
 }
 
 impl Tx3Node {
     /// Construct/bind a new Tx3Node with given configuration
     pub async fn new(mut config: Tx3Config) -> Result<(Self, Tx3Inbound)> {
         use futures::future::FutureExt;
+
+        let shutdown = Arc::new(tokio::sync::Notify::new());
 
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
@@ -77,8 +86,13 @@ impl Tx3Node {
                 Tx3Scheme::Tx3st => {
                     for addr in bind.socket_addrs().await? {
                         all_bind.push(
-                            bind_tx3_st(config.clone(), addr, con_send.clone())
-                                .boxed(),
+                            bind_tx3_st(
+                                config.clone(),
+                                addr,
+                                con_send.clone(),
+                                shutdown.clone(),
+                            )
+                            .boxed(),
                         );
                     }
                 }
@@ -94,6 +108,7 @@ impl Tx3Node {
                                 addrs,
                                 cert_digest,
                                 con_send.clone(),
+                                shutdown.clone(),
                             )
                             .boxed(),
                         );
@@ -114,7 +129,14 @@ impl Tx3Node {
             .flatten()
             .collect();
 
-        Ok((Self { config, addrs }, Tx3Inbound { recv: con_recv }))
+        Ok((
+            Self {
+                config,
+                addrs,
+                shutdown,
+            },
+            Tx3Inbound { recv: con_recv },
+        ))
     }
 
     /// Get the local TLS certificate digest associated with this node
@@ -128,7 +150,11 @@ impl Tx3Node {
     }
 
     /// Connect to a remote tx3 peer
-    pub async fn connect(&self, peer: Tx3Url) -> Result<Tx3Connection> {
+    pub async fn connect<T>(&self, peer: T) -> Result<Tx3Connection>
+    where
+        T: Into<Tx3Url>,
+    {
+        let peer = peer.into();
         match peer.scheme() {
             Tx3Scheme::Tx3st => {
                 let mut errs = Vec::new();
@@ -202,6 +228,7 @@ async fn bind_tx3_st(
     config: Arc<Tx3Config>,
     addr: SocketAddr,
     con_send: tokio::sync::mpsc::Sender<Tx3InboundAccept>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<Vec<Tx3Url>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
@@ -218,7 +245,14 @@ async fn bind_tx3_st(
     }
     tokio::task::spawn(async move {
         loop {
-            let ib_fut = match listener.accept().await {
+            let res = tokio::select! {
+                biased;
+
+                _ = shutdown.notified() => break,
+                r = listener.accept() => r,
+            };
+
+            let ib_fut = match res {
                 Err(e) => Tx3InboundAcceptInner::Err(e),
                 Ok((socket, _addr)) => {
                     match crate::tcp::tx3_tcp_configure(socket) {
@@ -251,6 +285,7 @@ async fn bind_tx3_rst(
     addrs: Vec<SocketAddr>,
     tgt_cert_digest: TlsCertDigest,
     con_send: tokio::sync::mpsc::Sender<Tx3InboundAccept>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<Vec<Tx3Url>> {
     let mut errs = Vec::new();
 
@@ -260,6 +295,7 @@ async fn bind_tx3_rst(
             addr,
             tgt_cert_digest.clone(),
             con_send.clone(),
+            shutdown.clone(),
         )
         .await
         {
@@ -279,6 +315,7 @@ async fn bind_tx3_rst_inner(
     addr: SocketAddr,
     tgt_cert_digest: TlsCertDigest,
     con_send: tokio::sync::mpsc::Sender<Tx3InboundAccept>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let mut control_socket = crate::tcp::tx3_tcp_connect(addr).await?;
     control_socket.write_all(&tgt_cert_digest[..]).await?;
@@ -288,10 +325,23 @@ async fn bind_tx3_rst_inner(
     if control_socket.remote_tls_cert_digest() != &tgt_cert_digest {
         return Err(other_err("InvalidPeerCert"));
     }
+
+    // read the "all-clear" byte before spawning the task
+    let mut all_clear = [0];
+    control_socket.read_exact(&mut all_clear).await?;
+
     tokio::task::spawn(async move {
         let mut splice_token = [0; 32];
         loop {
-            control_socket.read_exact(&mut splice_token).await?;
+            tokio::select! {
+                biased;
+
+                _ = shutdown.notified() => break,
+                r = control_socket.read_exact(&mut splice_token) => {
+                    r?;
+                }
+            }
+
             let ib_fut = Tx3InboundAcceptInner::Tx3rst(Tx3InboundAcceptRst {
                 tls: config.priv_tls().clone(),
                 addr,

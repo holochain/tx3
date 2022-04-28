@@ -1,6 +1,7 @@
 use crate::tls::*;
 use crate::*;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -61,7 +62,6 @@ pub struct Tx3RelayConfig {
     /// But even with the small number of 4 here, it only takes 80 distributed
     /// nodes to lock down a relay server.
     /// The default value is 4.
-    /// TODO - THIS IS NOT YET IMPLEMENTED
     #[serde(default = "default_max_control_streams_per_ip")]
     pub max_control_streams_per_ip: u32,
 
@@ -71,7 +71,6 @@ pub struct Tx3RelayConfig {
     /// incoming connections will be dropped before being reported to the
     /// control stream.
     /// The default value is 64.
-    /// TODO - THIS IS NOT YET IMPLEMENTED
     #[serde(default = "default_max_relays_per_control")]
     pub max_relays_per_control: u32,
 
@@ -132,11 +131,20 @@ impl std::ops::DerefMut for Tx3RelayConfig {
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
     addrs: Vec<Tx3Url>,
+    shutdown: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for Tx3Relay {
+    fn drop(&mut self) {
+        self.shutdown.notify_waiters();
+    }
 }
 
 impl Tx3Relay {
     /// Construct/bind a new Tx3Relay server instance with given config
     pub async fn new(mut config: Tx3RelayConfig) -> Result<Self> {
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
         }
@@ -167,6 +175,7 @@ impl Tx3Relay {
                             state.clone(),
                             inbound_limit.clone(),
                             control_limit.clone(),
+                            shutdown.clone(),
                         ));
                     }
                 }
@@ -186,7 +195,11 @@ impl Tx3Relay {
             .collect();
         tracing::info!(?addrs, "relay running");
 
-        Ok(Self { config, addrs })
+        Ok(Self {
+            config,
+            addrs,
+            shutdown,
+        })
     }
 
     /// Get the local TLS certificate digest associated with this relay
@@ -206,6 +219,7 @@ async fn bind_tx3_rst(
     state: RelayStateSync,
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<Vec<Tx3Url>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
@@ -224,11 +238,19 @@ async fn bind_tx3_rst(
 
     tokio::task::spawn(async move {
         loop {
-            match listener.accept().await {
+            let res = tokio::select! {
+                biased;
+
+                _ = shutdown.notified() => break,
+                r = listener.accept() => r,
+            };
+
+            match res {
                 Err(err) => {
                     tracing::warn!(?err, "accept error");
                 }
-                Ok((socket, _addr)) => {
+                Ok((socket, addr)) => {
+                    let ip = addr.ip();
                     let con_permit = match inbound_limit
                         .clone()
                         .try_acquire_owned()
@@ -250,6 +272,7 @@ async fn bind_tx3_rst(
                     tokio::task::spawn(process_socket(
                         config.clone(),
                         socket,
+                        ip,
                         state.clone(),
                         con_permit,
                         control_limit.clone(),
@@ -266,16 +289,28 @@ enum ControlCmd {
     NotifyPending(TlsCertDigest),
 }
 
+#[derive(Clone)]
+struct ControlInfo {
+    ctrl_send: tokio::sync::mpsc::Sender<ControlCmd>,
+    relay_limit: Arc<tokio::sync::Semaphore>,
+}
+
+struct PendingInfo {
+    socket: tokio::net::TcpStream,
+    relay_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 struct RelayState {
-    control_channels:
-        HashMap<TlsCertDigest, tokio::sync::mpsc::Sender<ControlCmd>>,
-    pending_tokens: HashMap<TlsCertDigest, tokio::net::TcpStream>,
+    control_channels: HashMap<TlsCertDigest, ControlInfo>,
+    control_addrs: HashMap<IpAddr, u32>,
+    pending_tokens: HashMap<TlsCertDigest, PendingInfo>,
 }
 
 impl RelayState {
     fn new() -> Self {
         Self {
             control_channels: HashMap::new(),
+            control_addrs: HashMap::new(),
             pending_tokens: HashMap::new(),
         }
     }
@@ -301,12 +336,13 @@ impl RelayStateSync {
 async fn process_socket(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
+    ip: IpAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
 ) {
     if let Err(err) =
-        process_socket_err(config, socket, state, con_permit, control_limit)
+        process_socket_err(config, socket, ip, state, con_permit, control_limit)
             .await
     {
         tracing::debug!(?err, "process_socket error");
@@ -316,6 +352,7 @@ async fn process_socket(
 async fn process_socket_err(
     config: Arc<Tx3RelayConfig>,
     mut socket: tokio::net::TcpStream,
+    ip: IpAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
@@ -349,6 +386,7 @@ async fn process_socket_err(
         return process_relay_control(
             config,
             socket,
+            ip,
             state,
             timeout,
             con_permit,
@@ -371,32 +409,45 @@ async fn process_socket_err(
 
         /// we have this connection token in our store,
         /// splice the connections together
-        HaveConToken(tokio::net::TcpStream, tokio::net::TcpStream),
+        HaveConToken(
+            tokio::net::TcpStream,
+            tokio::net::TcpStream,
+            tokio::sync::OwnedSemaphorePermit,
+        ),
 
-        /// we do not recognize this token, drop the socket
-        Unknown,
+        /// we should drop the socket
+        Drop,
     }
 
     let res = {
         let splice_token = splice_token.clone();
         state.access(move |state| {
-            if let Some(snd) = state.control_channels.get(&token) {
+            if let Some(info) = state.control_channels.get(&token) {
+                let relay_permit = match info.relay_limit.clone().try_acquire_owned() {
+                    Err(_) => {
+                        tracing::debug!("Dropping incoming connection, max_relays_per_control reached");
+                        return TokenRes::Drop;
+                    }
+                    Ok(permit) => permit,
+                };
                 tracing::debug!(cert = ?token, splice = ?splice_token, "incoming pending relay");
-                state.pending_tokens.insert(splice_token, socket);
-                TokenRes::HaveControl(snd.clone())
-            } else if let Some(socket2) = state.pending_tokens.remove(&token) {
+                state.pending_tokens.insert(splice_token, PendingInfo {
+                    socket,
+                    relay_permit,
+                });
+                TokenRes::HaveControl(info.ctrl_send.clone())
+            } else if let Some(info) = state.pending_tokens.remove(&token) {
                 tracing::debug!(splice = ?token, "incoming relay fulfill");
-                TokenRes::HaveConToken(socket, socket2)
+                TokenRes::HaveConToken(socket, info.socket, info.relay_permit)
             } else {
-                drop(socket);
-                TokenRes::Unknown
+                TokenRes::Drop
             }
         })
     };
 
     match res {
-        TokenRes::Unknown => (), // do nothing / the socket has been dropped
-        TokenRes::HaveControl(snd) => {
+        TokenRes::Drop => (), // do nothing / the socket has been dropped
+        TokenRes::HaveControl(ctrl_send) => {
             // we stored the socket in the pending map
 
             // set up a task to remove the entry if it's not claimed in the
@@ -413,9 +464,14 @@ async fn process_socket_err(
             }
 
             // notify the control stream of the pending connection
-            let _ = snd.send(ControlCmd::NotifyPending(splice_token)).await;
+            let _ = ctrl_send
+                .send(ControlCmd::NotifyPending(splice_token))
+                .await;
         }
-        TokenRes::HaveConToken(mut socket, mut socket2) => {
+        TokenRes::HaveConToken(mut socket, mut socket2, relay_permit) => {
+            // we just need to hold this permit until this splice ends
+            let _relay_permit = relay_permit;
+
             // splice the two sockets together
             // MAYBE: look into optimization on linux using
             //        https://man7.org/linux/man-pages/man2/splice.2.html
@@ -432,6 +488,7 @@ async fn process_socket_err(
 async fn process_relay_control(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
+    ip: IpAddr,
     state: RelayStateSync,
     timeout: tokio::time::Instant,
     con_permit: tokio::sync::OwnedSemaphorePermit,
@@ -451,22 +508,63 @@ async fn process_relay_control(
     {
         let remote_cert2 = remote_cert.clone();
 
+        let relay_limit = Arc::new(tokio::sync::Semaphore::new(
+            config.max_relays_per_control as usize,
+        ));
+
+        state.access(move |state| {
+            {
+                let ip_count = state.control_addrs.entry(ip).or_default();
+                if *ip_count < config.max_control_streams_per_ip {
+                    *ip_count += 1;
+                } else {
+                    tracing::warn!("Dropping incoming connection, max_control_streams_per_ip reached");
+                    // return the abort signal
+                    return Err(other_err("ExceededMaxCtrlPerIp"));
+                }
+            }
+
+            if let Some(_old) = state.control_channels.insert(
+                remote_cert2.clone(),
+                ControlInfo {
+                    ctrl_send,
+                    relay_limit,
+                },
+            ) {
+                tracing::debug!(
+                    cert = ?remote_cert2,
+                    "replaced existing control stream",
+                );
+                // if the old sender is dropped, the old control connection
+                // loop will end as well
+
+                // we could check the ip and if it matches don't check the
+                // per ip count here... but hopefully this situation doesn't
+                // come up often enough for it to make any difference.
+            }
+
+            Ok(())
+        })?;
+
         // from here on out, if we end, we need to remove the control_channel
-        if let Some(_old) = state.access(move |state| {
-            state
-                .control_channels
-                .insert(remote_cert2.clone(), ctrl_send)
-        }) {
-            tracing::debug!(cert = ?remote_cert, "replaced existing control stream");
-            // if the old sender is dropped, the old control connection
-            // loop will end as well
-        }
     }
 
     let res =
         process_relay_control_inner(socket, state.clone(), ctrl_recv).await;
 
     state.access(|state| {
+        if match state.control_addrs.get_mut(&ip) {
+            Some(ip_count) => {
+                if *ip_count > 0 {
+                    *ip_count -= 1;
+                }
+                *ip_count == 0
+            }
+            None => false,
+        } {
+            state.control_addrs.remove(&ip);
+        }
+
         state.control_channels.remove(&remote_cert);
     });
 
@@ -479,22 +577,33 @@ async fn process_relay_control(
 }
 
 async fn process_relay_control_inner(
-    socket: Tx3Connection,
+    mut socket: Tx3Connection,
     _state: RelayStateSync,
     mut ctrl_recv: tokio::sync::mpsc::Receiver<ControlCmd>,
 ) -> Result<()> {
+    // first, send the "all-clear" byte.
+    // without this, it's hard to wait for succesful control stream setup
+    // from the client side.
+    socket.write_all(&[0]).await?;
+    socket.flush().await?;
+
     let (mut read, mut write) = tokio::io::split(socket);
 
     tokio::select! {
         // read side - it is an error to send any data to the read side
         //             of a control connection
-        _ = async move {
+        r = async move {
             let mut buf = [0];
-            read.read_exact(&mut buf).await?;
-            Result::Ok(())
-        } => {
-            Err(other_err("ControlReadData"))
-        }
+            if read.read_exact(&mut buf).await.is_err() {
+                // we're taking a read-side error as an indication
+                // the control stream has been shutdown.
+                Ok(())
+            } else {
+                // otherwise, we read some data from the stream,
+                // which is an error.
+                Err(other_err("ControlReadData"))
+            }
+        } => r,
 
         // write side - write data to the control connection
         _ = async move {
