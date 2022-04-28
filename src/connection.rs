@@ -112,7 +112,7 @@ fn hash_cert(
             use sha2::Digest;
             let mut digest = sha2::Sha256::new();
             digest.update(&chain[0].0);
-            let digest: Arc<[u8; 32]> = Arc::new(digest.finalize().into());
+            let digest = TlsCertDigest(Arc::new(digest.finalize().into()));
             return Ok(digest);
         }
     }

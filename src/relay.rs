@@ -184,6 +184,7 @@ impl Tx3Relay {
             .into_iter()
             .flatten()
             .collect();
+        tracing::info!(?addrs, "relay running");
 
         Ok(Self { config, addrs })
     }
@@ -215,7 +216,7 @@ async fn bind_tx3_rst(
             url::Url::parse(&format!(
                 "tx3-rst://{}/{}",
                 a,
-                tls_cert_digest_b64_enc(config.priv_tls().cert_digest()),
+                config.priv_tls().cert_digest().to_b64(),
             ))
             .map_err(other_err)?,
         ));
@@ -225,7 +226,7 @@ async fn bind_tx3_rst(
         loop {
             match listener.accept().await {
                 Err(err) => {
-                    tracing::warn!(?err);
+                    tracing::warn!(?err, "accept error");
                 }
                 Ok((socket, _addr)) => {
                     let con_permit = match inbound_limit
@@ -241,7 +242,7 @@ async fn bind_tx3_rst(
 
                     let socket = match crate::tcp::tx3_tcp_configure(socket) {
                         Err(err) => {
-                            tracing::warn!(?err);
+                            tracing::warn!(?err, "tcp_configure error");
                             continue;
                         }
                         Ok(socket) => socket,
@@ -262,13 +263,13 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(Arc<[u8; 32]>),
+    NotifyPending(TlsCertDigest),
 }
 
 struct RelayState {
     control_channels:
         HashMap<TlsCertDigest, tokio::sync::mpsc::Sender<ControlCmd>>,
-    pending_tokens: HashMap<Arc<[u8; 32]>, tokio::net::TcpStream>,
+    pending_tokens: HashMap<TlsCertDigest, tokio::net::TcpStream>,
 }
 
 impl RelayState {
@@ -308,7 +309,7 @@ async fn process_socket(
         process_socket_err(config, socket, state, con_permit, control_limit)
             .await
     {
-        tracing::warn!(?err);
+        tracing::debug!(?err, "process_socket error");
     }
 }
 
@@ -330,7 +331,7 @@ async fn process_socket_err(
     tokio::time::timeout_at(timeout, socket.read_exact(&mut token[..]))
         .await??;
 
-    let token = Arc::new(token);
+    let token = TlsCertDigest(Arc::new(token));
 
     if token == this_cert {
         let control_permit = match control_limit.try_acquire_owned() {
@@ -361,7 +362,7 @@ async fn process_socket_err(
     ring::rand::SystemRandom::new()
         .fill(&mut splice_token[..])
         .map_err(|_| other_err("SystemRandomFailure"))?;
-    let splice_token = Arc::new(splice_token);
+    let splice_token = TlsCertDigest(Arc::new(splice_token));
 
     enum TokenRes {
         /// we host a control with this cert digest
@@ -380,9 +381,11 @@ async fn process_socket_err(
         let splice_token = splice_token.clone();
         state.access(move |state| {
             if let Some(snd) = state.control_channels.get(&token) {
+                tracing::debug!(cert = ?token, splice = ?splice_token, "incoming pending relay");
                 state.pending_tokens.insert(splice_token, socket);
                 TokenRes::HaveControl(snd.clone())
             } else if let Some(socket2) = state.pending_tokens.remove(&token) {
+                tracing::debug!(splice = ?token, "incoming relay fulfill");
                 TokenRes::HaveConToken(socket, socket2)
             } else {
                 drop(socket);
@@ -441,18 +444,20 @@ async fn process_relay_control(
     .await??;
 
     let remote_cert = socket.remote_tls_cert_digest().clone();
+    tracing::debug!(cert = ?remote_cert, "control stream established");
 
     let (ctrl_send, ctrl_recv) = tokio::sync::mpsc::channel(1);
 
     {
-        let remote_cert = remote_cert.clone();
+        let remote_cert2 = remote_cert.clone();
 
         // from here on out, if we end, we need to remove the control_channel
         if let Some(_old) = state.access(move |state| {
             state
                 .control_channels
-                .insert(remote_cert.clone(), ctrl_send)
+                .insert(remote_cert2.clone(), ctrl_send)
         }) {
+            tracing::debug!(cert = ?remote_cert, "replaced existing control stream");
             // if the old sender is dropped, the old control connection
             // loop will end as well
         }
@@ -464,6 +469,8 @@ async fn process_relay_control(
     state.access(|state| {
         state.control_channels.remove(&remote_cert);
     });
+
+    tracing::debug!(cert = ?remote_cert, "control stream ended");
 
     drop(con_permit);
     drop(control_permit);

@@ -211,7 +211,7 @@ async fn bind_tx3_st(
             url::Url::parse(&format!(
                 "tx3-st://{}/{}",
                 a,
-                tls_cert_digest_b64_enc(config.priv_tls().cert_digest()),
+                config.priv_tls().cert_digest().to_b64(),
             ))
             .map_err(other_err)?,
         ));

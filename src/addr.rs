@@ -120,7 +120,7 @@ impl Tx3Url {
     pub fn tls_cert_digest(&self) -> Option<TlsCertDigest> {
         if let Some(mut i) = self.0.path_segments() {
             if let Some(s) = i.next() {
-                if let Ok(d) = tls_cert_digest_b64_dec(s) {
+                if let Ok(d) = TlsCertDigest::from_b64(s) {
                     return Some(d);
                 }
             }
@@ -132,7 +132,7 @@ impl Tx3Url {
     /// Generate a new tx3 url with a specific tls cert digest
     pub fn with_tls_cert_digest(&self, cert_digest: &TlsCertDigest) -> Self {
         let mut u = self.0.clone();
-        u.set_path(&tls_cert_digest_b64_enc(cert_digest));
+        u.set_path(&cert_digest.to_b64());
         Self(u)
     }
 

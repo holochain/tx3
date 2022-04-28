@@ -2,8 +2,21 @@ use crate::*;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
+fn init_tracing() {
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(
+            tracing_subscriber::filter::EnvFilter::from_default_env(),
+        )
+        .with_file(true)
+        .with_line_number(true)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_test_st() {
+    init_tracing();
+
     let (node1, mut recv1) =
         Tx3Node::new(Tx3Config::default().with_bind("tx3-st://127.0.0.1:0"))
             .await
@@ -31,6 +44,8 @@ async fn smoke_test_st() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_test_rst() {
+    init_tracing();
+
     let relay = Tx3Relay::new(
         Tx3RelayConfig::default().with_bind("tx3-rst://127.0.0.1:0"),
     )
