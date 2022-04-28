@@ -5,24 +5,24 @@ type Result<T> = std::result::Result<T, String>;
 
 #[derive(Debug, Parser)]
 #[clap(
-    name = "tx3-proxy",
+    name = "tx3-relay",
     version,
     about = "TCP splicing relay for tx3 p2p communications"
 )]
 struct Opt {
-    /// Initialize a new tx3-proxy.yml configuration file
+    /// Initialize a new tx3-relay.yml configuration file
     /// (as specified by --config).
     /// Will abort if it already exists.
     #[clap(short, long, verbatim_doc_comment)]
     init: bool,
 
     /// Configuration file to use for running the
-    /// tx3-proxy.
+    /// tx3-relay.
     #[clap(
         short,
         long,
         verbatim_doc_comment,
-        default_value = "./tx3-proxy.yml"
+        default_value = "./tx3-relay.yml"
     )]
     config: std::path::PathBuf,
 }
@@ -30,8 +30,8 @@ struct Opt {
 #[non_exhaustive]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Tx3ProxyConfigFile {
-    /// tx3-proxy config file
+pub struct Tx3RelayConfigFile {
+    /// tx3-relay config file
     #[serde(flatten)]
     pub tx3_relay: Tx3RelayConfig,
 
@@ -75,12 +75,12 @@ async fn main_err() -> Result<()> {
         .await
         .map_err(|err| format!("{:?}", err))?;
 
-    println!("# tx3-proxy listening #");
-    println!("# tx3-proxy address list start #");
+    println!("# tx3-relay listening #");
+    println!("# tx3-relay address list start #");
     for addr in relay.local_addrs() {
         println!("{}", addr);
     }
-    println!("# tx3-proxy address list end #");
+    println!("# tx3-relay address list end #");
 
     futures::future::pending().await
 }
@@ -141,7 +141,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         ));
     }
 
-    let conf: Tx3ProxyConfigFile = match serde_yaml::from_str(&conf) {
+    let conf: Tx3RelayConfigFile = match serde_yaml::from_str(&conf) {
         Err(err) => {
             return Err(format!(
                 "Failed to parse config file {:?}: {:?}",
@@ -151,7 +151,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Ok(res) => res,
     };
 
-    let Tx3ProxyConfigFile {
+    let Tx3RelayConfigFile {
         mut tx3_relay,
         tls_cert_der,
         tls_cert_pk_der,
@@ -216,7 +216,7 @@ async fn run_init(opt: Opt) -> Result<()> {
     let cert = base64::encode(&cert.0);
     let cert_pk = base64::encode(&cert_pk.0);
 
-    let conf = Tx3ProxyConfigFile {
+    let conf = Tx3RelayConfigFile {
         tx3_relay: Tx3RelayConfig::default().with_bind("tx3-rst://0.0.0.0:0"),
         tls_cert_der: cert,
         tls_cert_pk_der: cert_pk,
@@ -254,6 +254,8 @@ async fn run_init(opt: Opt) -> Result<()> {
     if let Err(err) = file.shutdown().await {
         return Err(format!("Failed to flush/close config file: {:?}", err));
     }
+
+    println!("# tx3-relay wrote {:?} #", opt.config);
 
     Ok(())
 }

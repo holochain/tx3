@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 base64 = { version = "0.13.0", default-features = false, features = [ "std" ] }
 clap = { version = "3.1.12", default-features = false, features = [ "std", "derive" ] }
+doc-comment = { version = "0.3.3", default-features = false }
 futures = { version = "0.3.21", default-features = false, features = [ "std" ] }
 get_if_addrs = { version = "0.5.3", default-features = false }
 nanoid = { version = "0.4.0", default-features = false }
@@ -27,6 +28,8 @@ url = { version = "2.2.2", default-features = false, features = [ "serde" ] }
 [dev-dependencies]
 criterion = { version = "0.3.5", features = [ "async_tokio" ] }
 
+[build-dependencies]
+
 [package.metadata.docs.rs]
 # build docs.rs page with all features enabled so we can see the APIs
 all-features = true
@@ -35,8 +38,8 @@ all-features = true
 default = []
 
 [[bin]]
-name = "tx3-proxy"
-path = "src/bin/tx3_proxy.rs"
+name = "tx3-relay"
+path = "src/bin/tx3_relay.rs"
 
 [[bench]]
 name = "main"

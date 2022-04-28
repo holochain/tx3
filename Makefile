@@ -13,7 +13,12 @@ test: docs tools
 	@if [ "${CI}x" != "x" ]; then git diff --exit-code; fi
 
 docs: tools
+	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```no-compile\n' > src/docs/tx3_relay_help.md
+	cargo run -- --help >> src/docs/tx3_relay_help.md
+	printf '\n```\n' >> src/docs/tx3_relay_help.md
 	cargo readme -o README.md
+	printf '\n' >> README.md
+	cat src/docs/tx3_relay_help.md >> README.md
 
 tools: tool_rust tool_fmt tool_clippy tool_readme
 
