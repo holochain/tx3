@@ -287,14 +287,75 @@ struct V;
 impl rustls::client::ServerCertVerifier for V {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
+        end_entity: &rustls::Certificate,
+        intermediates: &[rustls::Certificate],
         _server_name: &rustls::ServerName,
         _scts: &mut dyn Iterator<Item = &[u8]>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        now: std::time::SystemTime,
     ) -> std::result::Result<rustls::client::ServerCertVerified, rustls::Error>
     {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        priv_verify_server_cert(end_entity, intermediates, now)
+            .map_err(|err| rustls::Error::General(format!("{:?}", err)))
     }
+}
+
+fn priv_verify_server_cert(
+    end_entity: &rustls::Certificate,
+    intermediates: &[rustls::Certificate],
+    now: std::time::SystemTime,
+) -> Result<rustls::client::ServerCertVerified> {
+    let (cert, chain, trustroots) = prepare(end_entity, intermediates)?;
+    let now = webpki::Time::try_from(now)
+        .map_err(|_| rustls::Error::FailedToGetCurrentTime)
+        .map_err(other_err)?;
+
+    // Since we're in a p2p situation, we treat server certs like client certs
+    cert.verify_is_valid_tls_client_cert(
+        SUPPORTED_SIG_ALGS,
+        &webpki::TlsClientTrustAnchors(&trustroots),
+        &chain,
+        now,
+    )
+    .map_err(other_err)
+    .map(|_| rustls::client::ServerCertVerified::assertion())
+}
+
+static SUPPORTED_SIG_ALGS: &[&webpki::SignatureAlgorithm] = &[
+    &webpki::ECDSA_P256_SHA256,
+    &webpki::ECDSA_P256_SHA384,
+    &webpki::ECDSA_P384_SHA256,
+    &webpki::ECDSA_P384_SHA384,
+    &webpki::ED25519,
+    &webpki::RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
+    &webpki::RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
+    &webpki::RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
+    &webpki::RSA_PKCS1_2048_8192_SHA256,
+    &webpki::RSA_PKCS1_2048_8192_SHA384,
+    &webpki::RSA_PKCS1_2048_8192_SHA512,
+    &webpki::RSA_PKCS1_3072_8192_SHA384,
+];
+
+type CertChainAndRoots<'a, 'b> = (
+    webpki::EndEntityCert<'a>,
+    Vec<&'a [u8]>,
+    Vec<webpki::TrustAnchor<'b>>,
+);
+
+fn prepare<'a, 'b>(
+    end_entity: &'a rustls::Certificate,
+    intermediates: &'a [rustls::Certificate],
+) -> Result<CertChainAndRoots<'a, 'b>> {
+    // EE cert must appear first.
+    let cert = webpki::EndEntityCert::try_from(end_entity.0.as_ref())
+        .map_err(other_err)?;
+
+    let intermediates: Vec<&'a [u8]> =
+        intermediates.iter().map(|cert| cert.0.as_ref()).collect();
+
+    let trustroots =
+        vec![webpki::TrustAnchor::try_from_cert_der(&*WK_CA_CERT_DER)
+            .map_err(other_err)?];
+
+    Ok((cert, intermediates, trustroots))
 }
