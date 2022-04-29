@@ -25,7 +25,7 @@
 //! plaintext. (If you want to learn more about the relay protocol, see
 //! the [Tx3Relay] docs.)
 //!
-//! ```no-compile
+//! ```text
 //!        +-------+
 //!        | relay | (TCP splicing)
 //!        +-------+
@@ -42,12 +42,16 @@
 //! this simple by including the TLS certificate digest in the url, so that
 //! holochain can easily provide signature verification.
 //!
-//! E.g. `tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw`
+//! E.g.
+//!
+//! ```text
+//! tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw
+//! ```
 //!
 //! Nodes that are directly addressable, or can configure port-forwarding are
 //! welcome and encouraged to make direct connections, instead of relaying.
 //!
-//! ```no-compile
+//! ```text
 //! +-------+ (TLS over TCP) +-------+
 //! | node1 |----------------| node2 |
 //! +-------+                +-------+

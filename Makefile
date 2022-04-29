@@ -14,7 +14,7 @@ static: docs tools
 	cargo clippy
 
 docs: tools
-	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```no-compile\n' > src/docs/tx3_relay_help.md
+	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```text\n' > src/docs/tx3_relay_help.md
 	cargo run -- --help >> src/docs/tx3_relay_help.md
 	printf '\n```\n' >> src/docs/tx3_relay_help.md
 	cargo readme -o README.md

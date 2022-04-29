@@ -35,4 +35,4 @@ jobs:
           RUST_LOG: DEBUG
         with:
           command: test
-          args: --all-features --all-targets
+          args: --all-features --all-targets -- --test-threads 1

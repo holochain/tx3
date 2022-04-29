@@ -1,6 +1,6 @@
 ### The `tx3-relay` executable
 `tx3-relay --help`
-```no-compile
+```text
 tx3-relay 0.0.1
 TCP splicing relay for tx3 p2p communications
 

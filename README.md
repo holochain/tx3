@@ -24,7 +24,7 @@ streams, ensuring the relay server or any MITM has no access to the
 plaintext. (If you want to learn more about the relay protocol, see
 the [Tx3Relay] docs.)
 
-```no-compile
+```
        +-------+
        | relay | (TCP splicing)
        +-------+
@@ -34,19 +34,23 @@ the [Tx3Relay] docs.)
 +-------+     +-------+
 | node1 |     | node2 |
 +-------+     +-------+
-```rust
+```
 
 As with many p2p solutions, ensuring you are talking to who you think you
 are is left to other layers of the application. But tx3 tries to make
 this simple by including the TLS certificate digest in the url, so that
 holochain can easily provide signature verification.
 
-E.g. `tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw`
+E.g.
+
+```
+tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw
+```
 
 Nodes that are directly addressable, or can configure port-forwarding are
 welcome and encouraged to make direct connections, instead of relaying.
 
-```no-compile
+```
 +-------+ (TLS over TCP) +-------+
 | node1 |----------------| node2 |
 +-------+                +-------+
@@ -138,7 +142,7 @@ License: Apache-2.0
 
 ### The `tx3-relay` executable
 `tx3-relay --help`
-```no-compile
+```text
 tx3-relay 0.0.1
 TCP splicing relay for tx3 p2p communications
 

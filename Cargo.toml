@@ -13,7 +13,6 @@ edition = "2021"
 [dependencies]
 base64 = { version = "0.13.0", default-features = false, features = [ "std" ] }
 clap = { version = "3.1.12", default-features = false, features = [ "std", "derive" ] }
-doc-comment = { version = "0.3.3", default-features = false }
 futures = { version = "0.3.21", default-features = false, features = [ "std" ] }
 get_if_addrs = { version = "0.5.3", default-features = false }
 once_cell = { version = "1.10.0", default-features = false }
