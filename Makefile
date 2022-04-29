@@ -7,7 +7,8 @@ SHELL = /usr/bin/env sh
 all: test
 
 test: static tools
-	RUST_BACKTRACE=1 cargo test --all-features --all-targets
+	RUST_BACKTRACE=1 cargo build --all-features --all-targets
+	RUST_BACKTRACE=1 cargo test --all-features -- --test-threads 1
 
 static: docs tools
 	cargo fmt -- --check
