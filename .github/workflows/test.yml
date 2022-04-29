@@ -32,8 +32,7 @@ jobs:
         uses: actions-rs/cargo@v1
         env:
           RUST_BACKTRACE: 1
+          RUST_LOG: DEBUG
         with:
           command: test
           args: --all-features --all-targets
-          env:
-            RUST_LOG: DEBUG
