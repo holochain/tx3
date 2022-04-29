@@ -1,16 +1,17 @@
 # tx3 Makefile
 
-.PHONY: all test docs tools tool_rust tool_fmt tool_readme
+.PHONY: all test static docs tools tool_rust tool_fmt tool_readme
 
 SHELL = /usr/bin/env sh
 
 all: test
 
-test: docs tools
+test: static tools
+	RUST_BACKTRACE=1 cargo test --all-features --all-targets
+
+static: docs tools
 	cargo fmt -- --check
 	cargo clippy
-	RUST_BACKTRACE=1 cargo test --all-features --all-targets
-	@if [ "${CI}x" != "x" ]; then git diff --exit-code; fi
 
 docs: tools
 	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```no-compile\n' > src/docs/tx3_relay_help.md
@@ -19,6 +20,7 @@ docs: tools
 	cargo readme -o README.md
 	printf '\n' >> README.md
 	cat src/docs/tx3_relay_help.md >> README.md
+	@if [ "${CI}x" != "x" ]; then git diff --exit-code; fi
 
 tools: tool_rust tool_fmt tool_clippy tool_readme
 

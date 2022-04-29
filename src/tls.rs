@@ -108,7 +108,16 @@ pub struct TlsPkDer(pub Box<[u8]>);
 
 /// Generate a new der-encoded tls certificate and private key
 pub fn gen_tls_cert_pair() -> Result<(TlsCertDer, TlsPkDer)> {
-    let sni = format!("a{}a.a{}a", nanoid::nanoid!(), nanoid::nanoid!());
+    let mut r = [0; 32];
+    use ring::rand::SecureRandom;
+    ring::rand::SystemRandom::new()
+        .fill(&mut r[..])
+        .map_err(|_| other_err("SystemRandomFailure"))?;
+
+    let sni = format!(
+        "tx3{}3xt",
+        base64::encode_config(r, base64::URL_SAFE_NO_PAD)
+    );
 
     let mut params = rcgen::CertificateParams::new(vec![sni.clone()]);
     params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;

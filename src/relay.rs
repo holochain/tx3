@@ -127,7 +127,50 @@ impl std::ops::DerefMut for Tx3RelayConfig {
     }
 }
 
-/// A tx3-rst relay server
+/// A tx3-rst relay server.
+///
+/// Note: unless you are writing test code, rather than using this directly
+/// you probably want to use the commandline binary executable `tx3-relay`.
+///
+/// ### The tx3 relay protocol
+///
+/// Tx3 relay functions via TLS secured control streams, and rendezvous TCP
+/// splicing. A client (typically behind a NAT) who wishes to be addressable
+/// establishes a TLS secured control stream to a known relay server. If the
+/// relay server agrees to relay, a single "all-clear" byte is sent back in
+/// response.
+///
+/// ```no-compile
+/// client                 relay server
+/// --+---                 --------+---
+///   | --- control open (TLS) --> |
+///   | <-- "all-clear" (TLS) ---- |
+/// ```
+///
+/// The client then takes the relay server's url, replaces its tls cert digest
+/// with the client's own tls cert digest to publish as the client's url.
+///
+/// A peer who wishes to contact the client opens a TCP connection to the
+/// relay server, and forwards in plain-text the 32 byte certificate digest
+/// of the target it wishes to connect to. The server generates a unique
+/// 32 byte "splice token" to identify the incoming connection, and forwards
+/// that splice token over the secure control channel to the target client.
+///
+/// If the client wishes to accept the incoming connection, it opens a new
+/// TCP connection to the relay server, and forwards that splice token.
+/// The server splices the connections together, and the client and peer
+/// proceed to handshake TLS over the resulting tunnelled connection.
+///
+/// ```no-compile
+/// client                  relay server                       peer
+/// --+---                  ------+-----                       --+-
+///   |                           | <-- tls digest over (TCP) -- |
+///   | <-- splice token (TLS) -- |                              |
+///   | -- splice token (TCP) --> |                              |
+///   |          relay server splices TCP connections            |
+///   | <------------------- TLS handshaking ------------------> |
+/// ```
+///
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
     addrs: Vec<Tx3Url>,
