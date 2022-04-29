@@ -37,6 +37,9 @@ async fn relay_test_max_inbound_connections() {
     // if we drop the first connection
     drop(node1);
 
+    // give the system time to notify the socket is closed
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     // the third connection should be a success again
     assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
         .await
@@ -69,6 +72,9 @@ async fn relay_test_max_control_streams() {
     // if we drop the first connection
     drop(node1);
 
+    // give the system time to notify the socket is closed
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     // the third connection should be a success again
     assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
         .await
@@ -100,6 +106,9 @@ async fn relay_test_max_control_streams_per_ip() {
 
     // if we drop the first connection
     drop(node1);
+
+    // give the system time to notify the socket is closed
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // the third connection should be a success again
     assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
@@ -158,6 +167,9 @@ async fn relay_test_max_relays_per_control() {
     // and after we drop it
     drop(c1);
     drop(n1);
+
+    // give the system time to notify the socket is closed
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let (n3, _) = Tx3Node::new(Tx3Config::new()).await.unwrap();
     // we are able to successfully establish c3
