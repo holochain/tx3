@@ -2,6 +2,12 @@
 
 tx3 p2p communications
 
+[![Project](https://img.shields.io/badge/project-holochain-blue.svg?style=flat-square)](http://holochain.org/)
+[![Forum](https://img.shields.io/badge/chat-forum%2eholochain%2enet-blue.svg?style=flat-square)](https://forum.holochain.org)
+[![Chat](https://img.shields.io/badge/chat-chat%2eholochain%2enet-blue.svg?style=flat-square)](https://chat.holochain.org)
+
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+
 #### An interim Holochain networking solution
 
 Holochain has experimented with many different networking solutions.
@@ -127,6 +133,8 @@ assert_eq!(b"world", &got[..]);
 // make sure our receiver task shuts down cleanly
 task.await.unwrap();
 ```
+
+License: Apache-2.0
 
 ### The `tx3-relay` executable
 `tx3-relay --help`

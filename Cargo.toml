@@ -1,6 +1,13 @@
 [package]
 name = "tx3"
 version = "0.0.1"
+description = "tx3 p2p communications"
+license = "Apache-2.0"
+homepage = "https://github.com/holochain/tx3"
+documentation = "https://docs.rs/tx3"
+authors = ["Holochain Core Dev Team <devcore@holochain.org>"]
+keywords = ["holochain", "holo", "p2p", "tcp", "networking"]
+categories = ["network-programming"]
 edition = "2021"
 
 [dependencies]
@@ -18,7 +25,7 @@ serde = { version = "1.0.136", default-features = false, features = [ "std", "de
 serde_yaml = { version = "0.8.23", default-features = false }
 sha2 = { version = "0.10.2", default-features = false, features = [ "std" ] }
 socket2 = { version = "0.4.4", default-features = false }
-tokio = { version = "1.17.0", default-features = false, features = [ "full" ] }
+tokio = { version = "1.18.0", default-features = false, features = [ "full" ] }
 tokio-rustls = { version = "0.23.3", default-features = false }
 tracing = { version = "0.1.34", default-features = false }
 tracing-subscriber = { version = "0.3.11", features = [ "env-filter" ] }

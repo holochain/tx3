@@ -52,6 +52,8 @@ async fn relay_test_max_inbound_connections() {
 async fn relay_test_max_control_streams() {
     init_tracing();
 
+    tracing::info!("setup relay");
+
     let mut relay_config =
         Tx3RelayConfig::new().with_bind("tx3-rst://127.0.0.1:0");
     relay_config.max_control_streams = 1;
@@ -59,21 +61,29 @@ async fn relay_test_max_control_streams() {
     let relay = Tx3Relay::new(relay_config).await.unwrap();
     let r_addr = relay.local_addrs()[0].to_owned();
 
+    tracing::info!("first connection");
+
     // make the first connection
     let node1 = Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
         .await
         .unwrap();
+
+    tracing::info!("second (expect to fail) connection");
 
     // the second connection should error
     assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
         .await
         .is_err());
 
+    tracing::info!("drop first connection");
+
     // if we drop the first connection
     drop(node1);
 
     // give the system time to notify the socket is closed
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    tracing::info!("third connection");
 
     // the third connection should be a success again
     assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))

@@ -28,7 +28,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
-      - name: Cargo Targets
+      - name: Cargo test
         uses: actions-rs/cargo@v1
         env:
           RUST_BACKTRACE: 1
