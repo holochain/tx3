@@ -1,10 +1,31 @@
 # tx3 Makefile
 
-.PHONY: all test static docs tools tool_rust tool_fmt tool_readme
+.PHONY: all publish test static docs tools tool_rust tool_fmt tool_readme
 
 SHELL = /usr/bin/env sh
 
 all: test
+
+publish:
+	@case "$(crate)" in \
+		tx3) \
+			export MANIFEST="./crates/tx3/Cargo.toml"; \
+			;; \
+		tx3_pool) \
+			export MANIFEST="./crates/tx3_pool/Cargo.toml"; \
+			;; \
+		*) \
+			echo "USAGE: make publish crate=tx3"; \
+			echo "USAGE: make publish crate=tx3_pool"; \
+			exit 1; \
+			;; \
+	esac; \
+	export VER="v$$(grep version $${MANIFEST} | head -1 | cut -d ' ' -f 3 | cut -d \" -f 2)"; \
+	echo "publish $(crate) $${MANIFEST} $${VER}"; \
+	git diff --exit-code && \
+	cargo publish --manifest-path $${MANIFEST} && \
+	git tag -a "$(crate)-$${VER}" -m "$(crate)-$${VER}" && \
+	git push --tags;
 
 test: static tools
 	RUST_BACKTRACE=1 cargo build --all-features --all-targets
@@ -15,12 +36,14 @@ static: docs tools
 	cargo clippy
 
 docs: tools
-	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```text\n' > src/docs/tx3_relay_help.md
-	cargo run -- --help >> src/docs/tx3_relay_help.md
-	printf '\n```\n' >> src/docs/tx3_relay_help.md
-	cargo readme -o README.md
-	printf '\n' >> README.md
-	cat src/docs/tx3_relay_help.md >> README.md
+	printf '### The `tx3-relay` executable\n`tx3-relay --help`\n```text\n' > crates/tx3/src/docs/tx3_relay_help.md
+	cargo run -- --help >> crates/tx3/src/docs/tx3_relay_help.md
+	printf '\n```\n' >> crates/tx3/src/docs/tx3_relay_help.md
+	cargo readme -r crates/tx3 -o README.md
+	cargo readme -r crates/tx3-pool -o README.md
+	printf '\n' >> crates/tx3/README.md
+	cat crates/tx3/src/docs/tx3_relay_help.md >> crates/tx3/README.md
+	cp crates/tx3/README.md README.md
 	@if [ "${CI}x" != "x" ]; then git diff --exit-code; fi
 
 tools: tool_rust tool_fmt tool_clippy tool_readme
