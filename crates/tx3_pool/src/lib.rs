@@ -28,6 +28,9 @@ use tokio::io::AsyncWrite;
 
 pub mod types;
 
+mod pool_con;
+pub(crate) use pool_con::*;
+
 mod pool;
 pub use pool::*;
 
@@ -114,7 +117,7 @@ mod tests {
         type Connection = tokio::io::DuplexStream;
     }
 
-    struct Connector(&'static str);
+    struct Connector(Arc<&'static str>);
     impl Tx3TransportConnector<Common> for Connector {
         type ConnectFut = Pin<
             Box<
@@ -132,10 +135,8 @@ mod tests {
             &self,
             id: Arc<<Common as Tx3TransportCommon>::EndpointId>,
         ) -> Self::ConnectFut {
-            let src = self.0;
-            Box::pin(async move {
-                mem_connect(src, *id).await
-            })
+            let src = self.0.clone();
+            Box::pin(async move { mem_connect(*src, *id).await })
         }
     }
 
@@ -192,9 +193,9 @@ mod tests {
                     + Send,
             >,
         >;
-        fn bind(self, path: Self::BindPath) -> Self::BindFut {
+        fn bind(self, path: Arc<Self::BindPath>) -> Self::BindFut {
             Box::pin(async move {
-                let listen = mem_bind(path)?;
+                let listen = mem_bind(*path)?;
 
                 let connector = Connector(path);
                 let acceptor = Acceptor(listen);
@@ -205,9 +206,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api() {
-        let (_, _p1, _r1) = Tx3Pool::bind(Transport, "one").await.unwrap();
-        let (_, p2, _r2) = Tx3Pool::bind(Transport, "two").await.unwrap();
+        let one = Arc::new("one");
+        let two = Arc::new("two");
 
-        p2.send("one", b"hello").await.unwrap();
+        let (_, _p1, _r1) =
+            Tx3Pool::bind(Transport, one.clone()).await.unwrap();
+        let (_, p2, _r2) = Tx3Pool::bind(Transport, two.clone()).await.unwrap();
+
+        p2.send(one.clone(), b"hello").await.unwrap();
     }
 }

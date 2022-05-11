@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::types::*;
 use crate::*;
 
@@ -23,7 +24,7 @@ impl Tx3PoolConfig {
 
 /// Tx3 incoming message stream.
 pub struct Tx3PoolIncoming<T: Tx3Transport> {
-    _p: std::marker::PhantomData<T>,
+    in_recv: tokio::sync::mpsc::UnboundedReceiver<Message<T>>,
 }
 
 impl<T: Tx3Transport> Tx3PoolIncoming<T> {
@@ -34,28 +35,44 @@ impl<T: Tx3Transport> Tx3PoolIncoming<T> {
         Arc<<<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId>,
         BytesList,
     )> {
-        todo!()
+        let msg = self.in_recv.recv().await?;
+        Some(msg.complete())
     }
 }
 
 /// Tx3 pool.
 pub struct Tx3Pool<T: Tx3Transport> {
-    _p: std::marker::PhantomData<T>,
+    task_cmd_send: tokio::sync::mpsc::UnboundedSender<PoolTaskCmd<T>>,
+    pool_term: Term,
+    new_msg_limit: Arc<tokio::sync::Semaphore>,
 }
 
 impl<T: Tx3Transport> Tx3Pool<T> {
+    fn priv_new(
+        task_cmd_send: tokio::sync::mpsc::UnboundedSender<PoolTaskCmd<T>>,
+        pool_term: Term,
+    ) -> Self {
+        let new_msg_limit = Arc::new(tokio::sync::Semaphore::new(1));
+        Self {
+            task_cmd_send,
+            pool_term,
+            new_msg_limit,
+        }
+    }
+
     /// Bind a new transport backend, wrapping it in Tx3Pool logic.
     pub async fn bind(
         transport: T,
-        path: T::BindPath,
+        path: Arc<T::BindPath>,
     ) -> Result<(T::BindAppData, Self, Tx3PoolIncoming<T>)> {
         let (app, _connector, _acceptor) = transport.bind(path).await?;
-        let this = Tx3Pool {
-            _p: std::marker::PhantomData,
-        };
-        let incoming = Tx3PoolIncoming {
-            _p: std::marker::PhantomData,
-        };
+        let (task_cmd_send, task_cmd_recv) =
+            tokio::sync::mpsc::unbounded_channel();
+        let pool_term = Term::new();
+        let this = Tx3Pool::priv_new(task_cmd_send, pool_term.clone());
+        let (_in_send, in_recv) = tokio::sync::mpsc::unbounded_channel();
+        let incoming = Tx3PoolIncoming { in_recv };
+        tokio::task::spawn(pool_task(task_cmd_recv, pool_term));
         Ok((app, this, incoming))
     }
 
@@ -72,7 +89,9 @@ impl<T: Tx3Transport> Tx3Pool<T> {
     /// the underlying transport
     pub async fn send<B: Into<BytesList>>(
         &self,
-        dst: <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId,
+        dst: Arc<
+            <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId,
+        >,
         data: B,
     ) -> Result<()> {
         let mut data = data.into();
@@ -81,78 +100,60 @@ impl<T: Tx3Transport> Tx3Pool<T> {
             return Err(other_err("MsgTooLarge"));
         }
         data.0.push_front(bytes::Bytes::copy_from_slice(
-            &(rem as u32).to_le_bytes()[..])
-        );
-        let (_msg, resolve) = <Message<T>>::new(dst, data);
+            &(rem as u32).to_le_bytes()[..],
+        ));
+        // TODO _ FIXME - this actually needs to be the outgoing bytes limit
+        let permit = self.new_msg_limit.clone().acquire_owned().await.unwrap();
+        let (res_s, res_r) = tokio::sync::oneshot::channel();
+        let msg_res = MsgRes::new(Some(res_s));
+        let msg = <Message<T>>::new(dst, data, permit, Some(msg_res));
+        // we never close this semaphore, so safe to unwrap
+        let permit = self.new_msg_limit.clone().acquire_owned().await.unwrap();
+        self.task_cmd_send
+            .send(PoolTaskCmd::NewMsg(msg, permit))
+            .map_err(|_| other_err("PollTaskClosed"))?;
         // because of the Drop impl on msg, this resolve should never err
-        resolve.await.unwrap()
+        res_r.await.unwrap()
     }
 
     /// Immediately terminate all connections, stopping all processing, both
     /// incoming and outgoing. This is NOT a graceful shutdown, and probably
     /// should only be used in testing scenarios.
-    pub async fn terminate() {
-        todo!()
+    pub fn terminate(&self) {
+        self.pool_term.term();
     }
 }
 
-#[derive(Debug)]
-enum StoryLine {
-    Dropped,
+enum PoolTaskCmd<T: Tx3Transport> {
+    NewMsg(Message<T>, tokio::sync::OwnedSemaphorePermit),
 }
 
-#[derive(Default, Debug)]
-struct Story(Vec<StoryLine>);
-
-impl std::fmt::Display for Story {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+async fn pool_task<T: Tx3Transport>(
+    cmd_recv: tokio::sync::mpsc::UnboundedReceiver<PoolTaskCmd<T>>,
+    pool_term: Term,
+) {
+    if let Err(err) = pool_task_inner(cmd_recv, pool_term).await {
+        tracing::error!(?err);
+    } else {
+        tracing::debug!("pool task ended");
     }
 }
 
-impl Story {
-    pub fn push(&mut self, story_line: StoryLine) {
-        self.0.push(story_line);
-    }
-}
-
-impl std::error::Error for Story {}
-
-struct Message<T: Tx3Transport> {
-    dst: <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId,
-    content: BytesList,
-    story: Option<Story>,
-    resolver: Option<tokio::sync::oneshot::Sender<Result<()>>>,
-}
-
-impl<T: Tx3Transport> Drop for Message<T> {
-    fn drop(&mut self) {
-        self.resolve(StoryLine::Dropped);
-    }
-}
-
-impl<T: Tx3Transport> Message<T> {
-    fn new(
-        dst: <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId,
-        content: BytesList,
-    ) -> (Self, tokio::sync::oneshot::Receiver<Result<()>>) {
-        let (s, r) = tokio::sync::oneshot::channel();
-        (
-            Self {
-                dst,
-                content,
-                story: Some(Story::default()),
-                resolver: Some(s),
-            },
-            r,
-        )
-    }
-
-    fn resolve(&mut self, story_line: StoryLine) {
-        if let Some(res) = self.resolver.take() {
-            let mut story = self.story.take().unwrap();
-            story.push(story_line);
-            let _ = res.send(Err(other_err(story)));
+async fn pool_task_inner<T: Tx3Transport>(
+    mut cmd_recv: tokio::sync::mpsc::UnboundedReceiver<PoolTaskCmd<T>>,
+    pool_term: Term,
+) -> Result<()> {
+    loop {
+        if pool_term.is_term() {
+            break;
         }
+        let _cmd = tokio::select! {
+            _ = pool_term.on_term() => break,
+            cmd = cmd_recv.recv() => match cmd {
+                None => break,
+                Some(cmd) => cmd,
+            },
+        };
     }
+    Ok(())
 }
