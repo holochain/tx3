@@ -29,7 +29,6 @@ use tokio::io::AsyncWrite;
 pub mod types;
 
 mod pool_con;
-pub(crate) use pool_con::*;
 
 mod pool;
 pub use pool::*;

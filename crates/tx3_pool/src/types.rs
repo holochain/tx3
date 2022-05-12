@@ -1,6 +1,8 @@
 //! Types you'll need if you're implementing transport newtypes for a pool.
 
 use crate::*;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::task::Poll;
@@ -223,9 +225,11 @@ impl Term {
         self.sig.notify_waiters();
     }
 
+    /*
     pub fn is_term(&self) -> bool {
         self.term.load(atomic::Ordering::Acquire)
     }
+    */
 
     pub fn on_term(
         &self,
@@ -254,132 +258,126 @@ impl Term {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum StoryLine {
-    Success,
-    Dropped,
-}
-
-impl std::fmt::Display for StoryLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for StoryLine {}
-
-#[derive(Default, Debug)]
-pub(crate) struct Story(Vec<StoryLine>);
-
-impl std::fmt::Display for Story {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Story {
-    pub fn push(&mut self, story_line: StoryLine) {
-        self.0.push(story_line);
-    }
-}
-
-impl std::error::Error for Story {}
-
-pub(crate) struct MsgRes {
-    resolver: Option<tokio::sync::oneshot::Sender<Result<()>>>,
-    create_time: tokio::time::Instant,
-    story: Option<Story>,
-}
-
-impl Default for MsgRes {
-    fn default() -> Self {
-        Self {
-            resolver: None,
-            create_time: tokio::time::Instant::now(),
-            story: Some(Story::default()),
-        }
-    }
-}
-
-impl Drop for MsgRes {
-    fn drop(&mut self) {
-        self.resolve(StoryLine::Dropped);
-    }
-}
-
-impl MsgRes {
-    pub fn new(
-        resolver: Option<tokio::sync::oneshot::Sender<Result<()>>>,
-    ) -> Self {
-        Self {
-            resolver,
-            create_time: tokio::time::Instant::now(),
-            story: Some(Story::default()),
-        }
-    }
-
-    pub fn record(&mut self, story_line: StoryLine) {
-        if let Some(story) = self.story.as_mut() {
-            story.push(story_line);
-        }
-    }
-
-    pub fn resolve(&mut self, story_line: StoryLine) {
-        let story = self.story.take();
-        if let Some(res) = self.resolver.take() {
-            if let StoryLine::Success = story_line {
-                let _ = res.send(Ok(()));
-                return;
-            }
-            if let Some(mut story) = story {
-                story.push(story_line);
-                let _ = res.send(Err(other_err(story)));
-            } else {
-                let _ = res.send(Err(other_err(story_line)));
-            }
-        }
-    }
-}
-
-pub(crate) struct Message<T: Tx3Transport> {
-    pub remote:
-        Arc<<<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId>,
+pub(crate) struct Message {
     pub content: BytesList,
     pub _permit: tokio::sync::OwnedSemaphorePermit,
-    pub msg_res: MsgRes,
 }
 
-impl<T: Tx3Transport> Message<T> {
+impl Message {
     pub fn new(
-        remote: Arc<
-            <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId,
-        >,
         content: BytesList,
         permit: tokio::sync::OwnedSemaphorePermit,
-        msg_res: Option<MsgRes>,
     ) -> Self {
-        let msg_res = msg_res.unwrap_or_default();
         Self {
-            remote,
             content,
             _permit: permit,
-            msg_res,
         }
     }
+}
 
-    pub fn complete(
-        self,
-    ) -> (
-        Arc<<<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId>,
-        BytesList,
-    ) {
-        let Self {
-            remote,
-            content,
-            mut msg_res,
-            ..
-        } = self;
-        msg_res.resolve(StoryLine::Success);
-        (remote, content)
+struct SharedPermitInner {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedPermit(Arc<SharedPermitInner>);
+
+impl SharedPermit {
+    fn priv_new(p: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self(Arc::new(SharedPermitInner { _permit: p }))
+    }
+}
+
+type SharedMap<K> = HashMap<
+    Arc<K>,
+    futures::future::Shared<
+        futures::future::BoxFuture<
+            'static,
+            std::result::Result<SharedPermit, ()>,
+        >,
+    >,
+>;
+
+#[derive(Clone)]
+pub(crate) struct SharedSemaphore<K>
+where
+    K: 'static + Send + Sync + Eq + std::hash::Hash,
+{
+    limit: Arc<tokio::sync::Semaphore>,
+    map: Arc<Mutex<SharedMap<K>>>,
+}
+
+impl<K> SharedSemaphore<K>
+where
+    K: 'static + Send + Sync + Eq + std::hash::Hash,
+{
+    pub fn new(count: u32) -> Self {
+        let limit = Arc::new(tokio::sync::Semaphore::new(count as usize));
+        let map = Arc::new(Mutex::new(HashMap::new()));
+        Self { limit, map }
+    }
+
+    fn access_map<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut SharedMap<K>) -> R,
+    {
+        let mut inner = self.map.lock();
+        f(&mut *inner)
+    }
+
+    pub fn close(&self) {
+        self.limit.close();
+        self.access_map(|map| {
+            map.clear();
+        });
+    }
+
+    /*
+    pub fn is_closed(&self) -> bool {
+        self.limit.is_closed()
+    }
+    */
+
+    pub fn remove(&self, key: &Arc<K>) {
+        self.access_map(|map| {
+            map.remove(key);
+        })
+    }
+
+    pub async fn get_permit(
+        &self,
+        key: Arc<K>,
+        count: u32,
+    ) -> std::result::Result<SharedPermit, ()> {
+        let limit = self.limit.clone();
+        self.access_map(move |map| {
+            use futures::future::BoxFuture;
+            use futures::future::FutureExt;
+            use futures::future::TryFutureExt;
+            use std::collections::hash_map::Entry;
+            match map.entry(key) {
+                Entry::Occupied(e) => Ok(e.get().clone()),
+                Entry::Vacant(e) => {
+                    if limit.is_closed() {
+                        return Err(());
+                    }
+                    let fut: BoxFuture<
+                        'static,
+                        std::result::Result<SharedPermit, ()>,
+                    > = async move {
+                        limit
+                            .acquire_many_owned(count)
+                            .map_err(|_| ())
+                            .map_ok(|p| SharedPermit::priv_new(p))
+                            .await
+                    }
+                    .boxed();
+                    let fut = fut.shared();
+                    e.insert(fut.clone());
+                    Ok(fut)
+                }
+            }
+        })?
+        .await
     }
 }
