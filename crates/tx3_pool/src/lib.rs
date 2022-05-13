@@ -43,6 +43,17 @@ mod tests {
     use std::task::Poll;
     use types::*;
 
+    fn init_tracing() {
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_env_filter(
+                tracing_subscriber::filter::EnvFilter::from_default_env(),
+            )
+            .with_file(true)
+            .with_line_number(true)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+
     struct MemListen {
         bind: &'static str,
         recv: tokio::sync::mpsc::Receiver<(
@@ -205,13 +216,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api() {
+        init_tracing();
+
         let one = Arc::new("one");
         let two = Arc::new("two");
 
-        let (_, _p1, _r1) =
+        let (_, _p1, mut r1) =
             Tx3Pool::bind(Transport, one.clone()).await.unwrap();
         let (_, p2, _r2) = Tx3Pool::bind(Transport, two.clone()).await.unwrap();
 
+        let rtask = tokio::task::spawn(async move {
+            let (remote, _msg) = r1.recv().await.unwrap();
+            tracing::info!("in msg: {:?}", remote);
+        });
+
         p2.send(one.clone(), b"hello").await.unwrap();
+
+        rtask.await.unwrap();
     }
 }

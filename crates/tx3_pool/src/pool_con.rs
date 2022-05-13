@@ -15,17 +15,19 @@ pub(crate) struct PoolCon {
 
 impl PoolCon {
     pub fn new<T: Tx3Transport>(
+        remote: Arc<Id<T>>,
         pool_term: Term,
+        con_term: Term,
         con: <<T as Tx3Transport>::Common as Tx3TransportCommon>::Connection,
-        in_send: tokio::sync::mpsc::UnboundedSender<Message>,
+        in_send: tokio::sync::mpsc::UnboundedSender<(Arc<Id<T>>, Message)>,
         max_in_bytes: usize,
         max_out_bytes: usize,
     ) -> Self {
-        let con_term = Term::new();
         let (out_send, out_recv) = tokio::sync::mpsc::unbounded_channel();
         let idle_timeout_s = Arc::new(atomic::AtomicU8::new(20));
 
         poll_con::<T>(
+            remote,
             pool_term,
             con_term.clone(),
             con,
@@ -72,11 +74,12 @@ impl PoolCon {
 }
 
 fn poll_con<T: Tx3Transport>(
+    remote: Arc<Id<T>>,
     pool_term: Term,
     con_term: Term,
     mut con: <<T as Tx3Transport>::Common as Tx3TransportCommon>::Connection,
     mut out_recv: tokio::sync::mpsc::UnboundedReceiver<Message>,
-    in_send: tokio::sync::mpsc::UnboundedSender<Message>,
+    in_send: tokio::sync::mpsc::UnboundedSender<(Arc<Id<T>>, Message)>,
     max_in_bytes: usize,
     idle_timeout_s: Arc<atomic::AtomicU8>,
 ) {
@@ -94,8 +97,20 @@ fn poll_con<T: Tx3Transport>(
     let mut in_cur_permit = None;
     let mut in_cur_permit_fut = None;
 
+    struct TermGuard(Term);
+
+    impl Drop for TermGuard {
+        fn drop(&mut self) {
+            self.0.term();
+        }
+    }
+
+    let term_guard = TermGuard(con_term);
+
     let mut last_action = tokio::time::Instant::now();
     tokio::task::spawn(futures::future::poll_fn(move |cx| {
+        let _term_guard = &term_guard;
+
         let mut did_something = false;
 
         // check to see if we've been terminated, and register waker
@@ -231,7 +246,7 @@ fn poll_con<T: Tx3Transport>(
                 in_bytes_list.take_front(next_len as usize),
                 permit,
             );
-            if in_send.send(msg).is_err() {
+            if in_send.send((remote.clone(), msg)).is_err() {
                 return Poll::Ready(());
             }
         }
@@ -245,7 +260,7 @@ fn poll_con<T: Tx3Transport>(
         if last_action.elapsed().as_millis() as u64
             >= (cur_idle_timeout_s as u64) * 1000
         {
-            con_term.term();
+            return Poll::Ready(());
         }
 
         Poll::Pending

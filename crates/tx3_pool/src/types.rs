@@ -44,7 +44,7 @@ pub trait Tx3TransportConnector<C: Tx3TransportCommon>:
 
 /// Acceptor type.
 pub trait Tx3TransportAcceptor<C: Tx3TransportCommon>:
-    'static + Send + Stream<Item = Self::AcceptFut>
+    'static + Send + Stream<Item = Self::AcceptFut> + Unpin
 {
     /// A future that resolves into an incoming connection, or errors.
     type AcceptFut: 'static
@@ -85,6 +85,9 @@ pub trait Tx3Transport: 'static + Send {
     /// Bind a new local endpoint of this type.
     fn bind(self, path: Arc<Self::BindPath>) -> Self::BindFut;
 }
+
+pub(crate) type Id<T> =
+    <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId;
 
 /// A set of distinct chunks of bytes that can be treated as a single unit
 #[derive(Default)]
@@ -210,19 +213,22 @@ impl bytes::Buf for BytesList {
 pub(crate) struct Term {
     term: Arc<atomic::AtomicBool>,
     sig: Arc<tokio::sync::Notify>,
+    trgr: Arc<dyn Fn() + 'static + Send + Sync>,
 }
 
 impl Term {
-    pub fn new() -> Self {
+    pub fn new(trgr: Arc<dyn Fn() + 'static + Send + Sync>) -> Self {
         Self {
             term: Arc::new(atomic::AtomicBool::new(false)),
             sig: Arc::new(tokio::sync::Notify::new()),
+            trgr,
         }
     }
 
     pub fn term(&self) {
         self.term.store(true, atomic::Ordering::Release);
         self.sig.notify_waiters();
+        (self.trgr)();
     }
 
     /*
@@ -307,6 +313,34 @@ where
     map: Arc<Mutex<SharedMap<K>>>,
 }
 
+#[allow(dead_code)]
+pub(crate) struct SharedPermitAcceptResolver<K>
+where
+    K: 'static + Send + Sync + Eq + std::hash::Hash,
+{
+    permit: SharedPermit,
+    map: Arc<Mutex<SharedMap<K>>>,
+}
+
+impl<K> SharedPermitAcceptResolver<K>
+where
+    K: 'static + Send + Sync + Eq + std::hash::Hash,
+{
+    #[allow(dead_code)]
+    pub fn resolve(self, _key: Arc<K>) -> std::result::Result<SharedPermit, ()> {
+        /*
+        use std::collections::hash_map::Entry;
+        match self.map.entry(key) {
+            Entry::Occupied(e) => {
+            }
+            Entry::Vacant(e) => {
+            }
+        }
+        */
+        todo!()
+    }
+}
+
 impl<K> SharedSemaphore<K>
 where
     K: 'static + Send + Sync + Eq + std::hash::Hash,
@@ -344,10 +378,19 @@ where
         })
     }
 
+    pub fn get_accept_permit(&self) -> Option<SharedPermitAcceptResolver<K>> {
+        match self.limit.clone().try_acquire_owned() {
+            Err(_) => None,
+            Ok(permit) => Some(SharedPermitAcceptResolver {
+                permit: SharedPermit::priv_new(permit),
+                map: self.map.clone(),
+            })
+        }
+    }
+
     pub async fn get_permit(
         &self,
         key: Arc<K>,
-        count: u32,
     ) -> std::result::Result<SharedPermit, ()> {
         let limit = self.limit.clone();
         self.access_map(move |map| {
@@ -366,7 +409,7 @@ where
                         std::result::Result<SharedPermit, ()>,
                     > = async move {
                         limit
-                            .acquire_many_owned(count)
+                            .acquire_owned()
                             .map_err(|_| ())
                             .map_ok(|p| SharedPermit::priv_new(p))
                             .await
