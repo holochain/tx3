@@ -12,6 +12,7 @@ const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
 #[non_exhaustive]
 pub struct Tx3PoolConfig {}
 
+#[allow(clippy::derivable_impls)]
 impl Default for Tx3PoolConfig {
     fn default() -> Self {
         Self {}
@@ -241,7 +242,7 @@ impl<T: Tx3Transport> Tx3Pool<T> {
             Ok(())
         })
         .await
-        .map_err(|err| other_err(err))?
+        .map_err(other_err)?
     }
 
     /// Immediately terminate all connections, stopping all processing, both
@@ -298,7 +299,9 @@ fn accept2<T: Tx3Transport>(
     con_limit: Arc<SharedSemaphore<Id<T>>>,
 ) {
     tokio::task::spawn(async move {
-        if let Err(err) = accept2_inner::<T>(acceptor, pool_term, con_limit).await {
+        if let Err(err) =
+            accept2_inner::<T>(acceptor, pool_term, con_limit).await
+        {
             tracing::debug!(?err);
         }
     });

@@ -73,6 +73,7 @@ impl PoolCon {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_con<T: Tx3Transport>(
     remote: Arc<Id<T>>,
     pool_term: Term,

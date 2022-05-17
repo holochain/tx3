@@ -327,7 +327,10 @@ where
     K: 'static + Send + Sync + Eq + std::hash::Hash,
 {
     #[allow(dead_code)]
-    pub fn resolve(self, _key: Arc<K>) -> std::result::Result<SharedPermit, ()> {
+    pub fn resolve(
+        self,
+        _key: Arc<K>,
+    ) -> std::result::Result<SharedPermit, ()> {
         /*
         use std::collections::hash_map::Entry;
         match self.map.entry(key) {
@@ -384,7 +387,7 @@ where
             Ok(permit) => Some(SharedPermitAcceptResolver {
                 permit: SharedPermit::priv_new(permit),
                 map: self.map.clone(),
-            })
+            }),
         }
     }
 
@@ -411,7 +414,7 @@ where
                         limit
                             .acquire_owned()
                             .map_err(|_| ())
-                            .map_ok(|p| SharedPermit::priv_new(p))
+                            .map_ok(SharedPermit::priv_new)
                             .await
                     }
                     .boxed();
