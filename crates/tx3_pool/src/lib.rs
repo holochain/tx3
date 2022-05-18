@@ -26,6 +26,8 @@ use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 
+pub mod ctrl;
+
 pub mod state;
 
 pub mod types;
