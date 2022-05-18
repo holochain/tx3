@@ -111,6 +111,11 @@ impl BytesList {
         }
     }
 
+    /// Extract the contents of this BytesList into a new one
+    pub fn extract(&mut self) -> Self {
+        Self(std::mem::take(&mut self.0))
+    }
+
     /// Remove specified byte cnt from the front of this list as a new list.
     /// Panics if self doesn't contain enough bytes.
     #[allow(clippy::comparison_chain)] // clearer written explicitly
@@ -231,11 +236,9 @@ impl Term {
         (self.trgr)();
     }
 
-    /*
     pub fn is_term(&self) -> bool {
         self.term.load(atomic::Ordering::Acquire)
     }
-    */
 
     pub fn on_term(
         &self,
