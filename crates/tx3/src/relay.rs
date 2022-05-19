@@ -246,7 +246,7 @@ impl Tx3Relay {
     }
 
     /// Get the local TLS certificate digest associated with this relay
-    pub fn local_tls_cert_digest(&self) -> &TlsCertDigest {
+    pub fn local_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
         self.config.priv_tls().cert_digest()
     }
 
@@ -329,7 +329,7 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(TlsCertDigest),
+    NotifyPending(Arc<TlsCertDigest>),
 }
 
 #[derive(Clone)]
@@ -344,9 +344,9 @@ struct PendingInfo {
 }
 
 struct RelayState {
-    control_channels: HashMap<TlsCertDigest, ControlInfo>,
+    control_channels: HashMap<Arc<TlsCertDigest>, ControlInfo>,
     control_addrs: HashMap<IpAddr, u32>,
-    pending_tokens: HashMap<TlsCertDigest, PendingInfo>,
+    pending_tokens: HashMap<Arc<TlsCertDigest>, PendingInfo>,
 }
 
 impl RelayState {
@@ -411,7 +411,7 @@ async fn process_socket_err(
     tokio::time::timeout_at(timeout, socket.read_exact(&mut token[..]))
         .await??;
 
-    let token = TlsCertDigest(Arc::new(token));
+    let token = Arc::new(TlsCertDigest(token));
 
     if token == this_cert {
         let control_permit = match control_limit.try_acquire_owned() {
@@ -443,7 +443,7 @@ async fn process_socket_err(
     ring::rand::SystemRandom::new()
         .fill(&mut splice_token[..])
         .map_err(|_| other_err("SystemRandomFailure"))?;
-    let splice_token = TlsCertDigest(Arc::new(splice_token));
+    let splice_token = Arc::new(TlsCertDigest(splice_token));
 
     enum TokenRes {
         /// we host a control with this cert digest

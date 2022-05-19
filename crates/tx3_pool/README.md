@@ -1,1 +1,1 @@
-# tx3-pool
+# tx3_pool
