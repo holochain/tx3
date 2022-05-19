@@ -106,7 +106,7 @@ impl Tx3Node {
                                 config.clone(),
                                 bind.clone(),
                                 addrs,
-                                cert_digest,
+                                Arc::new(cert_digest),
                                 con_send.clone(),
                                 shutdown.clone(),
                             )
@@ -140,7 +140,7 @@ impl Tx3Node {
     }
 
     /// Get the local TLS certificate digest associated with this node
-    pub fn local_tls_cert_digest(&self) -> &TlsCertDigest {
+    pub fn local_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
         self.config.priv_tls().cert_digest()
     }
 
@@ -169,7 +169,7 @@ impl Tx3Node {
             Tx3Scheme::Tx3rst => {
                 let tgt_cert_digest = match peer.tls_cert_digest() {
                     None => return Err(other_err("InvalidRstCert")),
-                    Some(digest) => digest,
+                    Some(digest) => Arc::new(digest),
                 };
                 let mut errs = Vec::new();
                 for addr in peer.socket_addrs().await? {
@@ -283,7 +283,7 @@ async fn bind_tx3_rst(
     config: Arc<Tx3Config>,
     relay_url: Tx3Url,
     addrs: Vec<SocketAddr>,
-    tgt_cert_digest: TlsCertDigest,
+    tgt_cert_digest: Arc<TlsCertDigest>,
     con_send: tokio::sync::mpsc::Sender<Tx3InboundAccept>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<Vec<Tx3Url>> {
@@ -313,7 +313,7 @@ async fn bind_tx3_rst(
 async fn bind_tx3_rst_inner(
     config: Arc<Tx3Config>,
     addr: SocketAddr,
-    tgt_cert_digest: TlsCertDigest,
+    tgt_cert_digest: Arc<TlsCertDigest>,
     con_send: tokio::sync::mpsc::Sender<Tx3InboundAccept>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
@@ -373,7 +373,7 @@ async fn connect_tx3_st(
 async fn connect_tx3_rst(
     config: Arc<Tx3Config>,
     addr: SocketAddr,
-    tgt_cert_digest: TlsCertDigest,
+    tgt_cert_digest: Arc<TlsCertDigest>,
 ) -> Result<Tx3Connection> {
     let mut socket = crate::tcp::tx3_tcp_connect(addr).await?;
     socket.write_all(&tgt_cert_digest[..]).await?;

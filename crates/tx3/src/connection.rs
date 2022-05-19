@@ -1,19 +1,19 @@
 use crate::tls::*;
 use crate::*;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use std::sync::Arc;
 
 /// A Tx3 p2p connection to a remote peer
 pub struct Tx3Connection {
-    remote_tls_cert_digest: TlsCertDigest,
+    remote_tls_cert_digest: Arc<TlsCertDigest>,
     socket: tokio_rustls::TlsStream<tokio::net::TcpStream>,
 }
 
 impl Tx3Connection {
     /// Get the TLS certificate digest of the remote end of this connection
-    pub fn remote_tls_cert_digest(&self) -> &TlsCertDigest {
+    pub fn remote_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
         &self.remote_tls_cert_digest
     }
 
@@ -105,14 +105,14 @@ impl tokio::io::AsyncWrite for Tx3Connection {
 
 fn hash_cert(
     socket: &tokio_rustls::TlsStream<tokio::net::TcpStream>,
-) -> Result<TlsCertDigest> {
+) -> Result<Arc<TlsCertDigest>> {
     let (_, c) = socket.get_ref();
     if let Some(chain) = c.peer_certificates() {
         if !chain.is_empty() {
             use sha2::Digest;
             let mut digest = sha2::Sha256::new();
             digest.update(&chain[0].0);
-            let digest = TlsCertDigest(Arc::new(digest.finalize().into()));
+            let digest = Arc::new(TlsCertDigest(digest.finalize().into()));
             return Ok(digest);
         }
     }

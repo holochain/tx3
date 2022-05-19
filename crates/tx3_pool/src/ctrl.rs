@@ -37,14 +37,14 @@
 
 use crate::types::*;
 use crate::*;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
-use std::collections::HashMap;
-use std::collections::VecDeque;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
-use parking_lot::Mutex;
 
 const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
 
@@ -87,10 +87,9 @@ pub trait PoolImp: 'static + Send + Sync {
     type Connection: 'static + Send + AsyncRead + AsyncWrite + Unpin;
 
     /// A future which resolves into an "accept" result.
-    type AcceptFut: 'static + Send + Future<Output = Result<(
-        Self::EndpointId,
-        Self::Connection,
-    )>>;
+    type AcceptFut: 'static
+        + Send
+        + Future<Output = Result<(Self::EndpointId, Self::Connection)>>;
 
     /// A future returned by the "connect" function.
     type ConnectFut: 'static + Send + Future<Output = Result<Self::Connection>>;
@@ -230,15 +229,13 @@ impl<I: PoolImp> Tx3Pool<I> {
                     .await
                     .map_err(other_err)?;
                 let (resolve, result) = tokio::sync::oneshot::channel();
-                let msg = OutboundMsg::new(
-                    permit,
-                    timeout_at,
-                    content,
-                    resolve,
-                );
+                let msg =
+                    OutboundMsg::new(permit, timeout_at, content, resolve);
                 pool_state.out_enqueue(peer_id, msg);
                 result.await.map_err(other_err)?
-            }).await.map_err(|_| other_err("Timeout"))?
+            })
+            .await
+            .map_err(|_| other_err("Timeout"))?
         }
     }
 
@@ -301,14 +298,16 @@ impl OutboundMsg {
         }
     }
 
-    pub fn extract_inner(&self) -> Option<(
+    pub fn extract_inner(
+        &self,
+    ) -> Option<(
         tokio::sync::OwnedSemaphorePermit,
         BytesList,
         tokio::sync::oneshot::Sender<Result<()>>,
     )> {
-        if let Some(inner) = OutboundMsgInner::access(&self.0, |inner| {
-            inner.take()
-        }) {
+        if let Some(inner) =
+            OutboundMsgInner::access(&self.0, |inner| inner.take())
+        {
             Some((inner.permit, inner.content, inner.resolve))
         } else {
             None
@@ -385,19 +384,16 @@ impl<K: RemId> PoolState<K> {
     /// if this returns None, there are no more messages, and the bucket
     /// will be cleared.
     pub fn out_dequeue(&self, peer_id: &Arc<K>) -> Option<OutboundMsg> {
-        PoolStateInner::access(&self.inner, |inner| {
-            inner.out_dequeue(peer_id)
-        })
+        PoolStateInner::access(&self.inner, |inner| inner.out_dequeue(peer_id))
     }
 
     /// If we have a valid peer_id in our out_priority queue, this will
     /// return that peer_id, but first we check for timeouts...
     /// If there are no peers, this will return None.
     pub fn get_next_con(&self) -> Option<ConGuard<K>> {
-        if let Some(peer_id) = PoolStateInner::access(
-            &self.inner,
-            |inner| inner.get_next_con(),
-        ) {
+        if let Some(peer_id) =
+            PoolStateInner::access(&self.inner, |inner| inner.get_next_con())
+        {
             Some(ConGuard {
                 pool_state: self.clone(),
                 peer_id,
@@ -439,11 +435,7 @@ struct ConInfo {
 
 struct PoolStateInner<K: RemId> {
     /// Queue of outgoing messages, awaiting a connection to send.
-    out_queue: VecDeque<(
-        Arc<K>,
-        tokio::time::Instant,
-        OutboundMsg,
-    )>,
+    out_queue: VecDeque<(Arc<K>, tokio::time::Instant, OutboundMsg)>,
 
     /// Information about connections for peer_ids,
     con_info: HashMap<Arc<K>, ConInfo>,
@@ -521,10 +513,13 @@ impl<K: RemId> PoolStateInner<K> {
         self.clear_timeouts();
         for (peer_id, _, _) in self.out_queue.iter() {
             if !self.con_info.contains_key(peer_id) {
-                self.con_info.insert(peer_id.clone(), ConInfo {
-                    is_active: true,
-                    cooldown: tokio::time::Instant::now(),
-                });
+                self.con_info.insert(
+                    peer_id.clone(),
+                    ConInfo {
+                        is_active: true,
+                        cooldown: tokio::time::Instant::now(),
+                    },
+                );
                 return Some(peer_id.clone());
             }
         }
@@ -672,17 +667,38 @@ async fn write_task<I: PoolImp>(
     let peer_id = con_guard.peer_id();
     'write_loop: loop {
         let msg = match pool_state.out_dequeue(&peer_id) {
-            None => break 'write_loop,
+            None => {
+                // we have no more data to write
+                break 'write_loop;
+            }
             Some(msg) => msg,
         };
+
         let (_permit, mut content, resolve) = match msg.extract_inner() {
             None => continue 'write_loop,
             Some(r) => r,
         };
 
+        let rem = content.remaining();
+
+        if rem == 0 {
+            let _ = resolve.send(Err(other_err("MsgLenZero")));
+            continue 'write_loop;
+        }
+
+        if rem > FI_LEN_MASK as usize {
+            let _ = resolve.send(Err(other_err("MsgTooLarge")));
+            continue 'write_loop;
+        }
+
+        content.0.push_front(bytes::Bytes::copy_from_slice(
+            &(rem as u32).to_le_bytes(),
+        ));
+
         while content.has_remaining() {
             tokio::select! {
                 _ = pool_term.on_term() => break 'write_loop,
+                // TODO - write_vectored?
                 r = con.write(content.chunk()) => match r {
                     Ok(n) => content.advance(n),
                     Err(err) => {

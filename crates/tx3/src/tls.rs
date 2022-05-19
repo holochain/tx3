@@ -50,8 +50,8 @@ static WK_CA_CERT_DER: Lazy<Arc<Vec<u8>>> = Lazy::new(|| {
 });
 
 /// Sha256 digest of DER encoded tls certificate
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TlsCertDigest(pub Arc<[u8; 32]>);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TlsCertDigest(pub [u8; 32]);
 
 impl std::fmt::Debug for TlsCertDigest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,7 +91,7 @@ impl TlsCertDigest {
         }
         let mut out = [0; 32];
         out.copy_from_slice(&v);
-        Ok(Self(Arc::new(out)))
+        Ok(Self(out))
     }
 
     /// encode a tls certificate digest into base64
@@ -214,7 +214,7 @@ impl TlsConfigBuilder {
 
         let mut digest = sha2::Sha256::new();
         digest.update(&cert.0);
-        let digest = TlsCertDigest(Arc::new(digest.finalize().into()));
+        let digest = Arc::new(TlsCertDigest(digest.finalize().into()));
 
         let cert = rustls::Certificate(cert.0.into_vec());
         let pk = rustls::PrivateKey(pk.0.into_vec());
@@ -276,7 +276,7 @@ pub struct TlsConfig {
     pub(crate) srv: Arc<rustls::ServerConfig>,
     #[allow(dead_code)]
     pub(crate) cli: Arc<rustls::ClientConfig>,
-    digest: TlsCertDigest,
+    digest: Arc<TlsCertDigest>,
 }
 
 impl TlsConfig {
@@ -286,7 +286,7 @@ impl TlsConfig {
     }
 
     /// Get the sha256 hash of the TLS certificate representing this server
-    pub fn cert_digest(&self) -> &TlsCertDigest {
+    pub fn cert_digest(&self) -> &Arc<TlsCertDigest> {
         &self.digest
     }
 }

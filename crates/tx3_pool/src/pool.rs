@@ -1,3 +1,53 @@
+//! Generic connection pool types.
+
+use crate::types::*;
+use std::future::Future;
+use std::io::Result;
+use std::sync::Arc;
+
+/// Generic connection pool.
+pub struct Pool<I: PoolImp> {
+    imp: Arc<I>,
+}
+
+impl<I: PoolImp> Pool<I> {
+    /// Construct a new generic connection pool.
+    pub fn new(_config: PoolConfig, imp: Arc<I>) -> Self {
+        Self {
+            imp,
+        }
+    }
+
+    /// Access the given implementation
+    pub fn as_imp(&self) -> &Arc<I> {
+        &self.imp
+    }
+
+    /// Enqueue an outgoing message for send to a remote peer.
+    pub fn send<B: Into<BytesList>>(
+        &self,
+        _peer_id: Arc<I::Id>,
+        _content: B,
+    ) -> impl Future<Output = Result<()>> + 'static + Send {
+        async move { todo!() }
+    }
+
+    /// Try to accept an incoming connection. Note, if we've reached
+    /// our incoming connection limit, this future will be dropped
+    /// without being awaited (TooManyConnections).
+    pub fn accept(&self, _accept_fut: I::AcceptFut) {
+        todo!()
+    }
+
+    /// Immediately terminate all connections, stopping all processing, both
+    /// incoming and outgoing. This is NOT a graceful shutdown, and probably
+    /// should only be used in testing scenarios.
+    pub fn terminate(&self) {
+        todo!()
+    }
+}
+
+/*
 #![allow(dead_code)]
 use crate::pool_con::*;
 use crate::types::*;
@@ -326,3 +376,4 @@ async fn accept2_inner<T: Tx3Transport>(
 
     Ok(())
 }
+*/

@@ -1,11 +1,18 @@
-//! Types you'll need if you're implementing transport newtypes for a pool.
+//! Support types for Tx3Pool implementations.
 
-use crate::*;
-use parking_lot::Mutex;
-use std::collections::HashMap;
+use bytes::Buf;
+use std::fmt::Debug;
+use std::future::Future;
+use std::hash::Hash;
+use std::io::Result;
 use std::pin::Pin;
 use std::sync::atomic;
+use std::sync::Arc;
 use std::task::Poll;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+
+pub(crate) const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
 
 /// Tx3 helper until `std::io::Error::other()` is stablized.
 pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
@@ -14,80 +21,54 @@ pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
     std::io::Error::new(std::io::ErrorKind::Other, error)
 }
 
-/// Common types.
-pub trait Tx3TransportCommon: 'static + Send + Sync {
+/// Marker trait for something that can act as a remote connection identifier.
+pub trait Id:
+    'static + Send + Sync + Debug + PartialEq + Eq + PartialOrd + Ord + Hash
+{
+}
+
+/// Receive an incoming message from a remote node.
+/// Gives mutable access to the internal BytesList, for parsing.
+/// The permit limiting the max read bytes in memory is bound to this struct.
+/// Drop this to allow that permit to be freed, allowing additional
+/// data to be read by the input readers.
+pub struct InboundMsg<K: Id> {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    peer_id: Arc<K>,
+    content: BytesList,
+}
+
+impl<K: Id> InboundMsg<K> {
+    /// Extract the contents of this message, dropping the permit,
+    /// thereby allowing additional messages to be buffered.
+    pub fn extract(self) -> (Arc<K>, BytesList) {
+        (self.peer_id, self.content)
+    }
+}
+
+/// When implementing a pool, the pool needs to be able to make certain
+/// calls out to the implementor. This PoolImp trait provides those calls.
+pub trait PoolImp: 'static + Send + Sync {
     /// A type which uniquely identifies an endpoint.
-    type EndpointId: 'static
-        + Send
-        + Sync
-        + Debug
-        + PartialEq
-        + Eq
-        + PartialOrd
-        + Ord
-        + Hash;
+    type Id: Id;
 
     /// The backend system transport connection type.
     type Connection: 'static + Send + AsyncRead + AsyncWrite + Unpin;
-}
 
-/// Connector type.
-pub trait Tx3TransportConnector<C: Tx3TransportCommon>:
-    'static + Send + Sync
-{
-    /// A future returned by the "connect" function.
-    type ConnectFut: 'static + Send + Future<Output = Result<C::Connection>>;
-
-    /// Establish a new outgoing connection to a remote peer.
-    fn connect(&self, id: Arc<C::EndpointId>) -> Self::ConnectFut;
-}
-
-/// Acceptor type.
-pub trait Tx3TransportAcceptor<C: Tx3TransportCommon>:
-    'static + Send + Stream<Item = Self::AcceptFut> + Unpin
-{
-    /// A future that resolves into an incoming connection, or errors.
+    /// A future which resolves into an "accept" result.
     type AcceptFut: 'static
         + Send
-        + Future<Output = Result<(Arc<C::EndpointId>, C::Connection)>>;
+        + Future<Output = Result<(Self::Id, Self::Connection)>>;
+
+    /// A future returned by the "connect" function.
+    type ConnectFut: 'static + Send + Future<Output = Result<Self::Connection>>;
+
+    /// Establish a new outgoing connection to a remote peer.
+    fn connect(&self, id: Arc<Self::Id>) -> Self::ConnectFut;
+
+    /// Receive an incoming message from a remote node.
+    fn incoming(&self, msg: InboundMsg<Self::Id>);
 }
-
-/// Implement this trait on a newtype to supply the backend system transport
-/// types and hooks to run a Tx3 pool.
-pub trait Tx3Transport: 'static + Send {
-    /// Common types.
-    type Common: Tx3TransportCommon;
-
-    /// Connector type.
-    type Connector: Tx3TransportConnector<Self::Common>;
-
-    /// Acceptor type.
-    type Acceptor: Tx3TransportAcceptor<Self::Common>;
-
-    /// A type which explains how to bind a local endpoint.
-    /// Could be a url or a set of urls.
-    type BindPath: 'static + Send + Sync;
-
-    /// Additional app data returned by the "bind" function
-    type BindAppData: 'static + Send;
-
-    /// A future returned by the "bind" function.
-    type BindFut: 'static
-        + Send
-        + Future<
-            Output = Result<(
-                Self::BindAppData,
-                Self::Connector,
-                Self::Acceptor,
-            )>,
-        >;
-
-    /// Bind a new local endpoint of this type.
-    fn bind(self, path: Arc<Self::BindPath>) -> Self::BindFut;
-}
-
-pub(crate) type Id<T> =
-    <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId;
 
 /// A set of distinct chunks of bytes that can be treated as a single unit
 #[derive(Default)]
@@ -214,15 +195,18 @@ impl bytes::Buf for BytesList {
     }
 }
 
+/// Terminal notification helper utility.
 #[derive(Clone)]
-pub(crate) struct Term {
+pub struct Term {
     term: Arc<atomic::AtomicBool>,
     sig: Arc<tokio::sync::Notify>,
     trgr: Arc<dyn Fn() + 'static + Send + Sync>,
 }
 
 impl Term {
-    pub fn new(trgr: Arc<dyn Fn() + 'static + Send + Sync>) -> Self {
+    /// Construct a new term instance with optional term callback.
+    pub fn new(trgr: Option<Arc<dyn Fn() + 'static + Send + Sync>>) -> Self {
+        let trgr = trgr.unwrap_or_else(|| Arc::new(|| {}));
         Self {
             term: Arc::new(atomic::AtomicBool::new(false)),
             sig: Arc::new(tokio::sync::Notify::new()),
@@ -230,16 +214,19 @@ impl Term {
         }
     }
 
+    /// Trigger termination.
     pub fn term(&self) {
         self.term.store(true, atomic::Ordering::Release);
         self.sig.notify_waiters();
         (self.trgr)();
     }
 
+    /// Returns `true` if termination has been triggered.
     pub fn is_term(&self) -> bool {
         self.term.load(atomic::Ordering::Acquire)
     }
 
+    /// Returns a future that will resolve when termination is triggered.
     pub fn on_term(
         &self,
     ) -> impl std::future::Future<Output = ()> + 'static + Send + Unpin {
@@ -266,6 +253,155 @@ impl Term {
         })
     }
 }
+
+/// Configuration for a [crate::pool::Pool] instance.
+#[non_exhaustive]
+pub struct PoolConfig {
+    /// Maximum byte length of a single message.
+    /// (Currently cannot be > u32::MAX >> 6 until multiplexing is implemented).
+    /// Default: u32::MAX >> 6.
+    pub max_msg_byte_count: u32,
+
+    /// How many conncurrent outgoing connections are allowed.
+    /// Default: 64.
+    pub max_out_con_count: u32,
+
+    /// How many concurrent incoming connections are allowed.
+    /// Default: 64.
+    pub max_in_con_count: u32,
+
+    /// How many bytes can build up in our outgoing buffer before
+    /// we start experiencing backpressure.
+    /// (Cannot be > usize::MAX >> 3 do to tokio semaphore limitations)
+    /// Default: u32::MAX >> 6.
+    pub max_out_byte_count: u64,
+
+    /// How many bytes can build up in our incoming buffer before
+    /// we stop reading to trigger backpressure.
+    /// (Cannot be > usize::MAX >> 3 do to tokio semaphore limitations)
+    /// Default: u32::MAX >> 6.
+    pub max_in_byte_count: u64,
+
+    /// Connect timeout after which to abandon establishing new connections,
+    /// or handshaking incoming connections.
+    /// Default: 20 seconds.
+    pub connect_timeout: std::time::Duration,
+
+    /// Idle timeout after which to close the connection.
+    /// Default: 20 seconds.
+    pub idle_timeout: std::time::Duration,
+
+    /// Time an outgoing message is allowed to remain queued but un-sent.
+    /// This timer stops counting as soon as it is claimed by a send worker.
+    /// Default: 20 seconds.
+    pub msg_send_timeout: std::time::Duration,
+
+    /// NOT PUB -- both sides should match -- someday negotiate? --
+    /// The max message read/write per connection before closing.
+    /// Default: 64.
+    #[allow(dead_code)]
+    max_read_write_msg_count_per_con: u64,
+
+    /// NOT PUB -- both sides should match -- someday negotiate? --
+    /// The max byte count that can be read/written per con before closing.
+    /// Default: u32::MAX >> 6.
+    #[allow(dead_code)]
+    max_read_write_byte_count_per_con: u64,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_msg_byte_count: FI_LEN_MASK,
+            max_out_con_count: 64,
+            max_in_con_count: 64,
+            max_out_byte_count: FI_LEN_MASK as u64,
+            max_in_byte_count: FI_LEN_MASK as u64,
+            connect_timeout: std::time::Duration::from_secs(20),
+            idle_timeout: std::time::Duration::from_secs(20),
+            msg_send_timeout: std::time::Duration::from_secs(20),
+            max_read_write_msg_count_per_con: 64,
+            max_read_write_byte_count_per_con: FI_LEN_MASK as u64,
+        }
+    }
+}
+
+/*
+/// Common types.
+pub trait Tx3TransportCommon: 'static + Send + Sync {
+    /// A type which uniquely identifies an endpoint.
+    type EndpointId: 'static
+        + Send
+        + Sync
+        + Debug
+        + PartialEq
+        + Eq
+        + PartialOrd
+        + Ord
+        + Hash;
+
+    /// The backend system transport connection type.
+    type Connection: 'static + Send + AsyncRead + AsyncWrite + Unpin;
+}
+
+/// Connector type.
+pub trait Tx3TransportConnector<C: Tx3TransportCommon>:
+    'static + Send + Sync
+{
+    /// A future returned by the "connect" function.
+    type ConnectFut: 'static + Send + Future<Output = Result<C::Connection>>;
+
+    /// Establish a new outgoing connection to a remote peer.
+    fn connect(&self, id: Arc<C::EndpointId>) -> Self::ConnectFut;
+}
+
+/// Acceptor type.
+pub trait Tx3TransportAcceptor<C: Tx3TransportCommon>:
+    'static + Send + Stream<Item = Self::AcceptFut> + Unpin
+{
+    /// A future that resolves into an incoming connection, or errors.
+    type AcceptFut: 'static
+        + Send
+        + Future<Output = Result<(Arc<C::EndpointId>, C::Connection)>>;
+}
+
+/// Implement this trait on a newtype to supply the backend system transport
+/// types and hooks to run a Tx3 pool.
+pub trait Tx3Transport: 'static + Send {
+    /// Common types.
+    type Common: Tx3TransportCommon;
+
+    /// Connector type.
+    type Connector: Tx3TransportConnector<Self::Common>;
+
+    /// Acceptor type.
+    type Acceptor: Tx3TransportAcceptor<Self::Common>;
+
+    /// A type which explains how to bind a local endpoint.
+    /// Could be a url or a set of urls.
+    type BindPath: 'static + Send + Sync;
+
+    /// Additional app data returned by the "bind" function
+    type BindAppData: 'static + Send;
+
+    /// A future returned by the "bind" function.
+    type BindFut: 'static
+        + Send
+        + Future<
+            Output = Result<(
+                Self::BindAppData,
+                Self::Connector,
+                Self::Acceptor,
+            )>,
+        >;
+
+    /// Bind a new local endpoint of this type.
+    fn bind(self, path: Arc<Self::BindPath>) -> Self::BindFut;
+}
+
+pub(crate) type Id<T> =
+    <<T as Tx3Transport>::Common as Tx3TransportCommon>::EndpointId;
+
 
 pub(crate) struct Message {
     pub content: BytesList,
@@ -430,3 +566,4 @@ where
         .await
     }
 }
+*/

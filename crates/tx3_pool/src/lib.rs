@@ -16,6 +16,17 @@
 //! - TODO - connection rate limiting on both outgoing and incoming data
 //! - TODO - message multiplexing to mitigate head-of-line blocking
 
+pub mod types;
+
+pub mod pool;
+
+mod tx3_pool_imp;
+pub use tx3_pool_imp::*;
+
+#[doc(inline)]
+pub use types::PoolConfig;
+
+/*
 use bytes::Buf;
 use futures::stream::Stream;
 use std::fmt::Debug;
@@ -30,7 +41,6 @@ pub mod ctrl;
 
 pub mod state;
 
-pub mod types;
 
 mod pool_con;
 
@@ -242,3 +252,4 @@ mod tests {
         */
     }
 }
+*/
