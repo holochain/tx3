@@ -1,9 +1,9 @@
 use crate::tls::*;
 use crate::*;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
-use std::sync::Arc;
 
 /// A Tx3 p2p connection to a remote peer
 pub struct Tx3Connection {

@@ -13,9 +13,7 @@ pub struct Pool<I: PoolImp> {
 impl<I: PoolImp> Pool<I> {
     /// Construct a new generic connection pool.
     pub fn new(_config: PoolConfig, imp: Arc<I>) -> Self {
-        Self {
-            imp,
-        }
+        Self { imp }
     }
 
     /// Access the given implementation

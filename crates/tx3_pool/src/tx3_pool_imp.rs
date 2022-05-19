@@ -1,10 +1,10 @@
 use crate::types::*;
-use std::io::Result;
-use std::sync::Arc;
-use std::future::Future;
-use std::pin::Pin;
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::Result;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Tx3 pool inbound message receiver.
 pub struct Tx3Recv {
@@ -16,7 +16,9 @@ pub struct Tx3Recv {
 
 impl Tx3Recv {
     /// Get the next inbound message received by this pool instance.
-    pub async fn recv(&mut self) -> Option<(Arc<tx3::tls::TlsCertDigest>, BytesList)> {
+    pub async fn recv(
+        &mut self,
+    ) -> Option<(Arc<tx3::tls::TlsCertDigest>, BytesList)> {
         self.inbound_recv.recv().await.map(|msg| {
             let (peer_id, content) = msg.extract();
             let peer_id = Arc::new(peer_id.0);
@@ -38,15 +40,12 @@ impl Tx3Pool {
     ) -> Result<(Self, Tx3Recv)> {
         let (node, _inbound) = tx3::Tx3Node::new(tx3_config).await?;
         let node = Arc::new(node);
-        let (inbound_send, inbound_recv) = tokio::sync::mpsc::unbounded_channel();
-        let pool_imp = Arc::new(Tx3PoolImp::new(node.clone(), inbound_send));
+        let (inbound_send, inbound_recv) =
+            tokio::sync::mpsc::unbounded_channel();
+        let pool_imp = Arc::new(Tx3PoolImp::new(node, inbound_send));
         let pool = Arc::new(crate::pool::Pool::new(pool_config, pool_imp));
-        let this = Self {
-            pool,
-        };
-        let recv = Tx3Recv {
-            inbound_recv,
-        };
+        let this = Self { pool };
+        let recv = Tx3Recv { inbound_recv };
         Ok((this, recv))
     }
 
@@ -119,12 +118,17 @@ impl PoolImp for Tx3PoolImp {
 
     type Connection = tx3::Tx3Connection;
 
-    type AcceptFut = Pin<Box<dyn Future<Output = Result<(
-        Self::Id,
-        Self::Connection,
-    )>> + 'static + Send>>;
+    type AcceptFut = Pin<
+        Box<
+            dyn Future<Output = Result<(Self::Id, Self::Connection)>>
+                + 'static
+                + Send,
+        >,
+    >;
 
-    type ConnectFut = Pin<Box<dyn Future<Output = Result<Self::Connection>> + 'static + Send>>;
+    type ConnectFut = Pin<
+        Box<dyn Future<Output = Result<Self::Connection>> + 'static + Send>,
+    >;
 
     fn connect(&self, id: Arc<Self::Id>) -> Self::ConnectFut {
         let inner = self.inner.clone();
@@ -167,10 +171,10 @@ impl Tx3PoolImpInner {
         self.id_registry.insert(id, url);
     }
 
-    pub fn prep_connect(&mut self, id: &Arc<Tx3PoolId>) -> Result<(
-        Arc<tx3::Tx3Node>,
-        tx3::Tx3Url,
-    )> {
+    pub fn prep_connect(
+        &mut self,
+        id: &Arc<Tx3PoolId>,
+    ) -> Result<(Arc<tx3::Tx3Node>, tx3::Tx3Url)> {
         if let Some(url) = self.id_registry.get(id) {
             Ok((self.node.clone(), url.clone()))
         } else {
