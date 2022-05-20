@@ -7,14 +7,14 @@ use std::task::Poll;
 
 /// A Tx3 p2p connection to a remote peer
 pub struct Tx3Connection {
-    remote_tls_cert_digest: Arc<TlsCertDigest>,
+    remote_id: Arc<Tx3Id>,
     socket: tokio_rustls::TlsStream<tokio::net::TcpStream>,
 }
 
 impl Tx3Connection {
     /// Get the TLS certificate digest of the remote end of this connection
-    pub fn remote_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
-        &self.remote_tls_cert_digest
+    pub fn remote_id(&self) -> &Arc<Tx3Id> {
+        &self.remote_id
     }
 
     // -- private -- //
@@ -27,11 +27,8 @@ impl Tx3Connection {
             .accept(socket)
             .await?
             .into();
-        let remote_tls_cert_digest = hash_cert(&socket)?;
-        Ok(Self {
-            remote_tls_cert_digest,
-            socket,
-        })
+        let remote_id = hash_cert(&socket)?;
+        Ok(Self { remote_id, socket })
     }
 
     pub(crate) async fn priv_connect(
@@ -43,11 +40,8 @@ impl Tx3Connection {
             .connect(name, socket)
             .await?
             .into();
-        let remote_tls_cert_digest = hash_cert(&socket)?;
-        Ok(Self {
-            remote_tls_cert_digest,
-            socket,
-        })
+        let remote_id = hash_cert(&socket)?;
+        Ok(Self { remote_id, socket })
     }
 }
 
@@ -105,14 +99,14 @@ impl tokio::io::AsyncWrite for Tx3Connection {
 
 fn hash_cert(
     socket: &tokio_rustls::TlsStream<tokio::net::TcpStream>,
-) -> Result<Arc<TlsCertDigest>> {
+) -> Result<Arc<Tx3Id>> {
     let (_, c) = socket.get_ref();
     if let Some(chain) = c.peer_certificates() {
         if !chain.is_empty() {
             use sha2::Digest;
             let mut digest = sha2::Sha256::new();
             digest.update(&chain[0].0);
-            let digest = Arc::new(TlsCertDigest(digest.finalize().into()));
+            let digest = Arc::new(Tx3Id(digest.finalize().into()));
             return Ok(digest);
         }
     }

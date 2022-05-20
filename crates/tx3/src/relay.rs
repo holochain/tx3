@@ -1,3 +1,47 @@
+//! A tx3 `rst` relay server.
+//!
+//! Note: unless you are writing test code, rather than using this directly
+//! you probably want to use the commandline binary executable `tx3-relay`.
+//!
+//! ### The tx3 relay protocol
+//!
+//! Tx3 relay functions via TLS secured control streams, and rendezvous TCP
+//! splicing. A client (typically behind a NAT) who wishes to be addressable
+//! establishes a TLS secured control stream to a known relay server. If the
+//! relay server agrees to relay, a single "all-clear" byte is sent back in
+//! response.
+//!
+//! ```no-compile
+//! client                 relay server
+//! --+---                 --------+---
+//!   | --- control open (TLS) --> |
+//!   | <-- "all-clear" (TLS) ---- |
+//! ```
+//!
+//! The client then takes the relay server's url, replaces its tls cert digest
+//! with the client's own tls cert digest to publish as the client's url.
+//!
+//! A peer who wishes to contact the client opens a TCP connection to the
+//! relay server, and forwards in plain-text the 32 byte certificate digest
+//! of the target it wishes to connect to. The server generates a unique
+//! 32 byte "splice token" to identify the incoming connection, and forwards
+//! that splice token over the secure control channel to the target client.
+//!
+//! If the client wishes to accept the incoming connection, it opens a new
+//! TCP connection to the relay server, and forwards that splice token.
+//! The server splices the connections together, and the client and peer
+//! proceed to handshake TLS over the resulting tunnelled connection.
+//!
+//! ```no-compile
+//! client                  relay server                       peer
+//! --+---                  ------+-----                       --+-
+//!   |                           | <-- tls digest over (TCP) -- |
+//!   | <-- splice token (TLS) -- |                              |
+//!   | -- splice token (TCP) --> |                              |
+//!   |          relay server splices TCP connections            |
+//!   | <------------------- TLS handshaking ------------------> |
+//! ```
+
 use crate::tls::*;
 use crate::*;
 use std::collections::HashMap;
@@ -104,11 +148,11 @@ impl Tx3RelayConfig {
 
     /// Append a bind to the list of bindings
     /// (shadow the deref builder function so we return ourselves)
-    pub fn with_bind<B>(mut self, bind: B) -> Self
+    pub fn with_bind<A>(mut self, bind: A) -> Self
     where
-        B: Into<Tx3Url>,
+        A: IntoAddr,
     {
-        self.tx3_config.bind.push(bind.into());
+        self.tx3_config.bind.push(bind.into_addr());
         self
     }
 }
@@ -127,53 +171,12 @@ impl std::ops::DerefMut for Tx3RelayConfig {
     }
 }
 
-/// A tx3-rst relay server.
+/// A tx3 `rst` relay server.
 ///
-/// Note: unless you are writing test code, rather than using this directly
-/// you probably want to use the commandline binary executable `tx3-relay`.
-///
-/// ### The tx3 relay protocol
-///
-/// Tx3 relay functions via TLS secured control streams, and rendezvous TCP
-/// splicing. A client (typically behind a NAT) who wishes to be addressable
-/// establishes a TLS secured control stream to a known relay server. If the
-/// relay server agrees to relay, a single "all-clear" byte is sent back in
-/// response.
-///
-/// ```no-compile
-/// client                 relay server
-/// --+---                 --------+---
-///   | --- control open (TLS) --> |
-///   | <-- "all-clear" (TLS) ---- |
-/// ```
-///
-/// The client then takes the relay server's url, replaces its tls cert digest
-/// with the client's own tls cert digest to publish as the client's url.
-///
-/// A peer who wishes to contact the client opens a TCP connection to the
-/// relay server, and forwards in plain-text the 32 byte certificate digest
-/// of the target it wishes to connect to. The server generates a unique
-/// 32 byte "splice token" to identify the incoming connection, and forwards
-/// that splice token over the secure control channel to the target client.
-///
-/// If the client wishes to accept the incoming connection, it opens a new
-/// TCP connection to the relay server, and forwards that splice token.
-/// The server splices the connections together, and the client and peer
-/// proceed to handshake TLS over the resulting tunnelled connection.
-///
-/// ```no-compile
-/// client                  relay server                       peer
-/// --+---                  ------+-----                       --+-
-///   |                           | <-- tls digest over (TCP) -- |
-///   | <-- splice token (TLS) -- |                              |
-///   | -- splice token (TCP) --> |                              |
-///   |          relay server splices TCP connections            |
-///   | <------------------- TLS handshaking ------------------> |
-/// ```
-///
+/// See module-level docs for additional details.
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
-    addrs: Vec<Tx3Url>,
+    addr: Arc<Tx3Addr>,
     shutdown: Arc<tokio::sync::Notify>,
 }
 
@@ -209,50 +212,61 @@ impl Tx3Relay {
         ));
 
         for bind in to_bind {
-            match bind.scheme() {
-                Tx3Scheme::Tx3rst => {
-                    for addr in bind.socket_addrs().await? {
-                        all_bind.push(bind_tx3_rst(
-                            config.clone(),
-                            addr,
-                            state.clone(),
-                            inbound_limit.clone(),
-                            control_limit.clone(),
-                            shutdown.clone(),
-                        ));
+            for stack in bind.stack_list.iter() {
+                match &**stack {
+                    Tx3Stack::RelayTlsTcp(addr) => {
+                        for addr in tokio::net::lookup_host(addr)
+                            .await
+                            .map_err(other_err)?
+                        {
+                            all_bind.push(bind_tx3_rst(
+                                config.clone(),
+                                addr,
+                                state.clone(),
+                                inbound_limit.clone(),
+                                control_limit.clone(),
+                                shutdown.clone(),
+                            ));
+                        }
                     }
-                }
-                oth => {
-                    return Err(other_err(format!(
-                        "Unsupported Scheme: {}",
-                        oth.as_str()
-                    )))
+                    oth => {
+                        return Err(other_err(format!(
+                            "Unsupported Stack: {}",
+                            oth
+                        )));
+                    }
                 }
             }
         }
 
-        let addrs = futures::future::try_join_all(all_bind)
+        let stack_list = futures::future::try_join_all(all_bind)
             .await?
             .into_iter()
             .flatten()
             .collect();
-        tracing::info!(?addrs, "relay running");
+
+        let addr = Arc::new(Tx3Addr {
+            id: Some(config.priv_tls().cert_digest().clone()),
+            stack_list,
+        });
+
+        tracing::info!(%addr, "relay running");
 
         Ok(Self {
             config,
-            addrs,
+            addr,
             shutdown,
         })
     }
 
     /// Get the local TLS certificate digest associated with this relay
-    pub fn local_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
+    pub fn local_id(&self) -> &Arc<Tx3Id> {
         self.config.priv_tls().cert_digest()
     }
 
     /// Get our bound addresses, if any
-    pub fn local_addrs(&self) -> &[Tx3Url] {
-        &self.addrs
+    pub fn local_addr(&self) -> &Arc<Tx3Addr> {
+        &self.addr
     }
 }
 
@@ -263,20 +277,13 @@ async fn bind_tx3_rst(
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
     shutdown: Arc<tokio::sync::Notify>,
-) -> Result<Vec<Tx3Url>> {
+) -> Result<Vec<Arc<Tx3Stack>>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
     let mut out = Vec::new();
 
     for a in upgrade_addr(addr)? {
-        out.push(Tx3Url::new(
-            url::Url::parse(&format!(
-                "tx3-rst://{}/{}",
-                a,
-                config.priv_tls().cert_digest().to_b64(),
-            ))
-            .map_err(other_err)?,
-        ));
+        out.push(Arc::new(Tx3Stack::RelayTlsTcp(a.to_string())));
     }
 
     tokio::task::spawn(async move {
@@ -329,7 +336,7 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(Arc<TlsCertDigest>),
+    NotifyPending(Arc<Tx3Id>),
 }
 
 #[derive(Clone)]
@@ -344,9 +351,9 @@ struct PendingInfo {
 }
 
 struct RelayState {
-    control_channels: HashMap<Arc<TlsCertDigest>, ControlInfo>,
+    control_channels: HashMap<Arc<Tx3Id>, ControlInfo>,
     control_addrs: HashMap<IpAddr, u32>,
-    pending_tokens: HashMap<Arc<TlsCertDigest>, PendingInfo>,
+    pending_tokens: HashMap<Arc<Tx3Id>, PendingInfo>,
 }
 
 impl RelayState {
@@ -411,7 +418,7 @@ async fn process_socket_err(
     tokio::time::timeout_at(timeout, socket.read_exact(&mut token[..]))
         .await??;
 
-    let token = Arc::new(TlsCertDigest(token));
+    let token = Arc::new(Tx3Id(token));
 
     if token == this_cert {
         let control_permit = match control_limit.try_acquire_owned() {
@@ -443,7 +450,7 @@ async fn process_socket_err(
     ring::rand::SystemRandom::new()
         .fill(&mut splice_token[..])
         .map_err(|_| other_err("SystemRandomFailure"))?;
-    let splice_token = Arc::new(TlsCertDigest(splice_token));
+    let splice_token = Arc::new(Tx3Id(splice_token));
 
     enum TokenRes {
         /// we host a control with this cert digest
@@ -543,7 +550,7 @@ async fn process_relay_control(
     )
     .await??;
 
-    let remote_cert = socket.remote_tls_cert_digest().clone();
+    let remote_cert = socket.remote_id().clone();
     tracing::debug!(cert = ?remote_cert, "control stream established");
 
     let (ctrl_send, ctrl_recv) = tokio::sync::mpsc::channel(1);

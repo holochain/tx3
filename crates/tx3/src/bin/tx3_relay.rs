@@ -1,4 +1,5 @@
 use clap::Parser;
+use tx3::relay::*;
 use tx3::*;
 
 type Result<T> = std::result::Result<T, String>;
@@ -76,11 +77,9 @@ async fn main_err() -> Result<()> {
         .map_err(|err| format!("{:?}", err))?;
 
     println!("# tx3-relay listening #");
-    println!("# tx3-relay address list start #");
-    for addr in relay.local_addrs() {
-        println!("{}", addr);
-    }
-    println!("# tx3-relay address list end #");
+    println!("# tx3-relay address start #");
+    println!("{}", relay.local_addr());
+    println!("# tx3-relay address end #");
 
     futures::future::pending().await
 }
@@ -217,7 +216,7 @@ async fn run_init(opt: Opt) -> Result<()> {
     let cert_pk = base64::encode(&cert_pk.0);
 
     let conf = Tx3RelayConfigFile {
-        tx3_relay: Tx3RelayConfig::default().with_bind("tx3-rst://0.0.0.0:0"),
+        tx3_relay: Tx3RelayConfig::default().with_bind("tx3:-/rst/0.0.0.0:0/"),
         tls_cert_der: cert,
         tls_cert_pk_der: cert_pk,
     };
