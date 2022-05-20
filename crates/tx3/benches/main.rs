@@ -3,6 +3,7 @@ use futures::future::try_join_all;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tx3::relay::*;
 use tx3::*;
 
 const COUNT: usize = 3;
@@ -78,12 +79,12 @@ struct BenchTx3st {
 impl BenchTx3st {
     pub async fn new(data: Arc<[u8]>) -> Self {
         let (r_ep, mut recv) = Tx3Node::new(
-            Tx3Config::default().with_bind("tx3-st://127.0.0.1:0"),
+            Tx3Config::default().with_bind("tx3:-/st/127.0.0.1:0/"),
         )
         .await
         .unwrap();
 
-        let addr = r_ep.local_addrs()[0].to_owned();
+        let addr = r_ep.local_addr().clone();
 
         let recv = tokio::task::spawn(async move {
             let mut out = Vec::with_capacity(COUNT);
@@ -145,19 +146,19 @@ struct BenchTx3rst {
 impl BenchTx3rst {
     pub async fn new(data: Arc<[u8]>) -> Self {
         let relay = Tx3Relay::new(
-            Tx3RelayConfig::default().with_bind("tx3-rst://127.0.0.1:0"),
+            Tx3RelayConfig::default().with_bind("tx3:-/rst/127.0.0.1:0/"),
         )
         .await
         .unwrap();
 
-        let r_addr = relay.local_addrs()[0].to_owned();
+        let r_addr = relay.local_addr().clone();
 
         let (r_ep, mut recv) =
             Tx3Node::new(Tx3Config::default().with_bind(r_addr))
                 .await
                 .unwrap();
 
-        let addr = r_ep.local_addrs()[0].to_owned();
+        let addr = r_ep.local_addr().clone();
 
         let recv = tokio::task::spawn(async move {
             let mut out = Vec::with_capacity(COUNT);

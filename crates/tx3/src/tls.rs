@@ -49,57 +49,6 @@ static WK_CA_CERT_DER: Lazy<Arc<Vec<u8>>> = Lazy::new(|| {
     Arc::new(cert)
 });
 
-/// Sha256 digest of DER encoded tls certificate
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TlsCertDigest(pub [u8; 32]);
-
-impl std::fmt::Debug for TlsCertDigest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut a = self.to_b64();
-        a.replace_range(8..a.len() - 8, "..");
-        f.write_str(&a)
-    }
-}
-
-impl std::fmt::Display for TlsCertDigest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.to_b64())
-    }
-}
-
-impl std::ops::Deref for TlsCertDigest {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0[..]
-    }
-}
-
-impl AsRef<[u8]> for TlsCertDigest {
-    fn as_ref(&self) -> &[u8] {
-        &self.0[..]
-    }
-}
-
-impl TlsCertDigest {
-    /// decode a base64 encoded tls certificate digest
-    pub fn from_b64(s: &str) -> Result<Self> {
-        let v = base64::decode_config(s, base64::URL_SAFE_NO_PAD)
-            .map_err(other_err)?;
-        if v.len() != 32 {
-            return Err(other_err("InvalidTlsCertDigest"));
-        }
-        let mut out = [0; 32];
-        out.copy_from_slice(&v);
-        Ok(Self(out))
-    }
-
-    /// encode a tls certificate digest into base64
-    pub fn to_b64(&self) -> String {
-        base64::encode_config(self, base64::URL_SAFE_NO_PAD)
-    }
-}
-
 /// DER encoded tls certificate
 pub struct TlsCertDer(pub Box<[u8]>);
 
@@ -214,7 +163,7 @@ impl TlsConfigBuilder {
 
         let mut digest = sha2::Sha256::new();
         digest.update(&cert.0);
-        let digest = Arc::new(TlsCertDigest(digest.finalize().into()));
+        let digest = Arc::new(Tx3Id(digest.finalize().into()));
 
         let cert = rustls::Certificate(cert.0.into_vec());
         let pk = rustls::PrivateKey(pk.0.into_vec());
@@ -276,7 +225,7 @@ pub struct TlsConfig {
     pub(crate) srv: Arc<rustls::ServerConfig>,
     #[allow(dead_code)]
     pub(crate) cli: Arc<rustls::ClientConfig>,
-    digest: Arc<TlsCertDigest>,
+    digest: Arc<Tx3Id>,
 }
 
 impl TlsConfig {
@@ -286,7 +235,7 @@ impl TlsConfig {
     }
 
     /// Get the sha256 hash of the TLS certificate representing this server
-    pub fn cert_digest(&self) -> &Arc<TlsCertDigest> {
+    pub fn cert_digest(&self) -> &Arc<Tx3Id> {
         &self.digest
     }
 }

@@ -3,151 +3,275 @@
 // many of these are coppied from the nightly std library, don't want to muck
 #![allow(clippy::nonminimal_bool)]
 
-use crate::tls::*;
 use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-/// Tx3 url schemes, see Tx3Url for more details
+/// Tx3 node/peer identifier. Sha256 digest of DER encoded tls certificate.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum Tx3Scheme<'a> {
-    /// `tx3-st` - direct TLS over TCP stream socket
-    Tx3st,
+pub struct Tx3Id(pub [u8; 32]);
 
-    /// `tx3-rst` - relayed TLS over TCP
-    Tx3rst,
-
-    /// Other tx3 scheme not handled by this implementation
-    Other(&'a str),
+impl std::fmt::Debug for Tx3Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut a = self.to_b64();
+        a.replace_range(8..a.len() - 8, "..");
+        f.write_str(&a)
+    }
 }
 
-impl Tx3Scheme<'_> {
-    /// Get the scheme as a &str
-    pub fn as_str(&self) -> &str {
+impl std::fmt::Display for Tx3Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_b64())
+    }
+}
+
+impl std::ops::Deref for Tx3Id {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0[..]
+    }
+}
+
+impl AsRef<[u8]> for Tx3Id {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[..]
+    }
+}
+
+impl Tx3Id {
+    /// Decode a base64 encoded Tx3Id.
+    pub fn from_b64(s: &str) -> Result<Arc<Self>> {
+        let v = base64::decode_config(s, base64::URL_SAFE_NO_PAD)
+            .map_err(other_err)?;
+        if v.len() != 32 {
+            return Err(other_err("InvalidTlsCertDigest"));
+        }
+        let mut out = [0; 32];
+        out.copy_from_slice(&v);
+        Ok(Arc::new(Self(out)))
+    }
+
+    /// Encode a Tx3Id as base64.
+    pub fn to_b64(&self) -> String {
+        base64::encode_config(self, base64::URL_SAFE_NO_PAD)
+    }
+}
+
+/// Available stacks for tx3 backend transports.
+#[derive(Debug)]
+pub enum Tx3Stack {
+    /// `st` - direct TLS over TCP stream socket.
+    TlsTcp(String),
+
+    /// `rst` - relayed TLS over TCP.
+    RelayTlsTcp(String),
+
+    /// Other tx3 stack not handled by this implementation.
+    Other(String, String),
+}
+
+impl std::fmt::Display for Tx3Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Tx3Scheme::Tx3st => "tx3-st",
-            Tx3Scheme::Tx3rst => "tx3-rst",
-            Tx3Scheme::Other(s) => s,
+            Tx3Stack::TlsTcp(v) => write!(f, "st/{}", v),
+            Tx3Stack::RelayTlsTcp(v) => write!(f, "rst/{}", v),
+            Tx3Stack::Other(k, v) => write!(f, "{}/{}", k, v),
         }
     }
 }
 
-impl<'a> From<&'a str> for Tx3Scheme<'a> {
-    fn from(s: &'a str) -> Self {
-        match s {
-            "tx3-st" => Tx3Scheme::Tx3st,
-            "tx3-rst" => Tx3Scheme::Tx3rst,
-            oth => Tx3Scheme::Other(oth),
+impl Tx3Stack {
+    /// Parse &str pair into a Tx3Stack variant.
+    pub fn from_pair(k: &str, v: &str) -> Self {
+        match k {
+            "st" => Tx3Stack::TlsTcp(v.to_string()),
+            "rst" => Tx3Stack::RelayTlsTcp(v.to_string()),
+            _ => Tx3Stack::Other(k.to_string(), v.to_string()),
+        }
+    }
+
+    /// Get the stack as &str pair.
+    pub fn as_pair(&self) -> (&str, &str) {
+        match self {
+            Tx3Stack::TlsTcp(v) => ("st", v.as_str()),
+            Tx3Stack::RelayTlsTcp(v) => ("rst", v.as_str()),
+            Tx3Stack::Other(k, v) => (k.as_str(), v.as_str()),
         }
     }
 }
 
-/// A url representing a tx3 p2p endpoint.
-///
-/// Example binding urls:
-///
-/// - `tx3-st://0.0.0.0:0` - bind to all interfaces, os-determined port
-/// - `tx3-rst://relay.holo.host:12345/relay_cert_digest` - bind as a
-///   relay client to a relay hosted at the given host/port using a tls
-///   cert with the given sha256 digest (base64url encoded with no pad)
-///
-/// Example addressable urls after binding:
-///
-/// - `tx3-st://1.1.1.1:12345/my_node_cert` - reachable at host/port
-///   with the given node tls cert sha256 digest (base64url encoded no pad)
-/// - `tx3-rst://relay.holo.host:12345/my_node_cert` - reachable via relay
-///   with the node cert instead of the relay cert
-#[derive(
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
-#[serde(transparent)]
-pub struct Tx3Url(url::Url);
+/// A Tx3 Addr is a canonical peer identifier grouped with a prioritized
+/// list of stacks at which the peer can be reached.
+/// A Tx3 Addr can be encoded as a `tx3:` url.
+#[derive(Default, Clone)]
+pub struct Tx3Addr {
+    /// Peer identifier.
+    pub id: Option<Arc<Tx3Id>>,
 
-impl std::fmt::Display for Tx3Url {
+    /// Prioritized list of stacks.
+    pub stack_list: Vec<Arc<Tx3Stack>>,
+}
+
+impl serde::Serialize for Tx3Addr {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_url())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Tx3Addr {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tmp: String = serde::Deserialize::deserialize(deserializer)?;
+        Ok(tmp.into())
+    }
+}
+
+impl std::fmt::Debug for Tx3Addr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        f.write_str(&self.to_url())
     }
 }
 
-impl std::fmt::Debug for Tx3Url {
+impl std::fmt::Display for Tx3Addr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        f.write_str(&self.to_url())
     }
 }
 
-impl From<Tx3Url> for url::Url {
-    fn from(t: Tx3Url) -> Self {
-        t.0
+/// Indicates a type that can be turned into an `Arc<Tx3Addr>`.
+pub trait IntoAddr {
+    /// Convert this type into an `Arc<Tx3Addr>`.
+    fn into_addr(self) -> Arc<Tx3Addr>;
+}
+
+impl IntoAddr for Arc<Tx3Addr> {
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        self
     }
 }
 
-impl From<&str> for Tx3Url {
+impl IntoAddr for &Arc<Tx3Addr> {
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        self.clone()
+    }
+}
+
+impl IntoAddr for &str {
+    #[inline(always)]
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        Arc::new(self.into())
+    }
+}
+
+impl IntoAddr for String {
+    #[inline(always)]
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        Arc::new(self.into())
+    }
+}
+
+impl IntoAddr for &String {
+    #[inline(always)]
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        Arc::new(self.into())
+    }
+}
+
+impl IntoAddr for url::Url {
+    #[inline(always)]
+    fn into_addr(self) -> Arc<Tx3Addr> {
+        Arc::new(self.into())
+    }
+}
+
+impl From<&str> for Tx3Addr {
+    #[inline(always)]
     fn from(s: &str) -> Self {
-        Tx3Url::new(url::Url::parse(s).expect("invalid tx3 url"))
+        match url::Url::parse(s) {
+            Ok(url) => url.into(),
+            Err(_) => Tx3Addr::default(),
+        }
     }
 }
 
-impl From<&Tx3Url> for Tx3Url {
-    fn from(u: &Tx3Url) -> Self {
-        u.clone()
+impl From<String> for Tx3Addr {
+    #[inline(always)]
+    fn from(s: String) -> Self {
+        s.as_str().into()
     }
 }
 
-impl Tx3Url {
-    /// Construct & verify a tx3 url
-    pub fn new(url: url::Url) -> Self {
-        url.host_str().expect("tx3 url must include a host");
-        url.port().expect("tx3 url must include a port");
-        Self(url)
+impl From<&String> for Tx3Addr {
+    #[inline(always)]
+    fn from(s: &String) -> Self {
+        s.as_str().into()
     }
+}
 
-    /// Read the tx3 scheme from the url
-    pub fn scheme(&self) -> Tx3Scheme<'_> {
-        self.0.scheme().into()
-    }
+impl From<url::Url> for Tx3Addr {
+    fn from(url: url::Url) -> Self {
+        let mut this = Tx3Addr::default();
 
-    /// Read the certificate digest (if it exists) from the url
-    pub fn tls_cert_digest(&self) -> Option<TlsCertDigest> {
-        if let Some(mut i) = self.0.path_segments() {
-            if let Some(s) = i.next() {
-                if let Ok(d) = TlsCertDigest::from_b64(s) {
-                    return Some(d);
+        let mut iter = url.path().split_terminator('/');
+
+        match iter.next() {
+            None => return this,
+            Some(id) => {
+                if let Ok(id) = Tx3Id::from_b64(id) {
+                    this.id = Some(id);
                 }
             }
         }
 
-        None
-    }
+        loop {
+            let k = match iter.next() {
+                None => break,
+                Some(k) => k,
+            };
 
-    /// Generate a new tx3 url with a specific tls cert digest
-    pub fn with_tls_cert_digest(&self, cert_digest: &TlsCertDigest) -> Self {
-        let mut u = self.0.clone();
-        u.set_path(&cert_digest.to_b64());
-        Self(u)
-    }
+            let v = match iter.next() {
+                None => return this,
+                Some(v) => v,
+            };
 
-    /// Translate this tx3 url into a socket addr we can use to
-    /// attempt a connection
-    pub(crate) async fn socket_addrs(
-        &self,
-    ) -> Result<impl Iterator<Item = SocketAddr>> {
-        tokio::net::lookup_host(format!(
-            "{}:{}",
-            self.0.host_str().unwrap(),
-            self.0.port().unwrap(),
-        ))
-        .await
-        .map_err(other_err)
+            this.stack_list.push(Arc::new(Tx3Stack::from_pair(k, v)));
+        }
+
+        this
+    }
+}
+
+impl Tx3Addr {
+    /// Encode this addr instance as a url.
+    pub fn to_url(&self) -> String {
+        let mut out = String::new();
+        out.push_str("tx3:");
+        if let Some(id) = &self.id {
+            out.push_str(&id.to_b64());
+        } else {
+            out.push('-');
+        }
+        out.push('/');
+        for stack in self.stack_list.iter() {
+            let (k, v) = stack.as_pair();
+            out.push_str(k);
+            out.push('/');
+            out.push_str(v);
+            out.push('/');
+        }
+        out
     }
 }
 

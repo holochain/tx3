@@ -5,6 +5,7 @@
 
 use crate::tls::*;
 use crate::*;
+use std::sync::Arc;
 
 /// Tx3 configuration
 #[non_exhaustive]
@@ -15,12 +16,14 @@ pub struct Tx3Config {
     /// remote peers. The default empty list indicates we will NOT be
     /// addressable, and can only make outgoing connections.
     ///
-    /// Currently, we support the following schemes:
+    /// Currently, we support the following stacks:
     ///
-    /// - `tx3-st` for binding to local tcp network interfaces
-    /// - `tx3-rst` for binding through a remote relay tcp splicer
+    /// - `st` for binding to local tcp network interfaces
+    ///   - e.g.: `tx3:-/st/0.0.0.0:0/`
+    /// - `rst` for binding through a remote relay tcp splicer
+    ///   - e.g.: `tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141/`
     #[serde(default)]
-    pub bind: Vec<Tx3Url>,
+    pub bind: Vec<Arc<Tx3Addr>>,
 
     /// TLS configuration for this node. This will never be serialized
     /// to prevent bad practices. You should set this after deserializing
@@ -46,11 +49,11 @@ impl Tx3Config {
     }
 
     /// Append a bind to the list of bindings
-    pub fn with_bind<B>(mut self, bind: B) -> Self
+    pub fn with_bind<A>(mut self, bind: A) -> Self
     where
-        B: Into<Tx3Url>,
+        A: IntoAddr,
     {
-        self.bind.push(bind.into());
+        self.bind.push(bind.into_addr());
         self
     }
 
