@@ -104,11 +104,11 @@ impl Tx3RelayConfig {
 
     /// Append a bind to the list of bindings
     /// (shadow the deref builder function so we return ourselves)
-    pub fn with_bind<B>(mut self, bind: B) -> Self
+    pub fn with_bind<A>(mut self, bind: A) -> Self
     where
-        B: Into<Tx3Url>,
+        A: IntoAddr,
     {
-        self.tx3_config.bind.push(bind.into());
+        self.tx3_config.bind.push(bind.into_addr());
         self
     }
 }
@@ -173,7 +173,7 @@ impl std::ops::DerefMut for Tx3RelayConfig {
 ///
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
-    addrs: Vec<Tx3Url>,
+    addr: Arc<Tx3Addr>,
     shutdown: Arc<tokio::sync::Notify>,
 }
 
@@ -209,50 +209,61 @@ impl Tx3Relay {
         ));
 
         for bind in to_bind {
-            match bind.scheme() {
-                Tx3Scheme::Tx3rst => {
-                    for addr in bind.socket_addrs().await? {
-                        all_bind.push(bind_tx3_rst(
-                            config.clone(),
-                            addr,
-                            state.clone(),
-                            inbound_limit.clone(),
-                            control_limit.clone(),
-                            shutdown.clone(),
-                        ));
+            for stack in bind.stack_list.iter() {
+                match &**stack {
+                    Tx3Stack::RelayTlsTcp(addr) => {
+                        for addr in tokio::net::lookup_host(addr)
+                            .await
+                            .map_err(other_err)?
+                        {
+                            all_bind.push(bind_tx3_rst(
+                                config.clone(),
+                                addr,
+                                state.clone(),
+                                inbound_limit.clone(),
+                                control_limit.clone(),
+                                shutdown.clone(),
+                            ));
+                        }
                     }
-                }
-                oth => {
-                    return Err(other_err(format!(
-                        "Unsupported Scheme: {}",
-                        oth.as_str()
-                    )))
+                    oth => {
+                        return Err(other_err(format!(
+                            "Unsupported Stack: {}",
+                            oth
+                        )));
+                    }
                 }
             }
         }
 
-        let addrs = futures::future::try_join_all(all_bind)
+        let stack_list = futures::future::try_join_all(all_bind)
             .await?
             .into_iter()
             .flatten()
             .collect();
-        tracing::info!(?addrs, "relay running");
+
+        let addr = Arc::new(Tx3Addr {
+            id: Some(config.priv_tls().cert_digest().clone()),
+            stack_list,
+        });
+
+        tracing::info!(%addr, "relay running");
 
         Ok(Self {
             config,
-            addrs,
+            addr,
             shutdown,
         })
     }
 
     /// Get the local TLS certificate digest associated with this relay
-    pub fn local_tls_cert_digest(&self) -> &Arc<TlsCertDigest> {
+    pub fn local_id(&self) -> &Arc<Tx3Id> {
         self.config.priv_tls().cert_digest()
     }
 
     /// Get our bound addresses, if any
-    pub fn local_addrs(&self) -> &[Tx3Url] {
-        &self.addrs
+    pub fn local_addr(&self) -> &Arc<Tx3Addr> {
+        &self.addr
     }
 }
 
@@ -263,20 +274,13 @@ async fn bind_tx3_rst(
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
     shutdown: Arc<tokio::sync::Notify>,
-) -> Result<Vec<Tx3Url>> {
+) -> Result<Vec<Arc<Tx3Stack>>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
     let mut out = Vec::new();
 
     for a in upgrade_addr(addr)? {
-        out.push(Tx3Url::new(
-            url::Url::parse(&format!(
-                "tx3-rst://{}/{}",
-                a,
-                config.priv_tls().cert_digest().to_b64(),
-            ))
-            .map_err(other_err)?,
-        ));
+        out.push(Arc::new(Tx3Stack::RelayTlsTcp(a.to_string())));
     }
 
     tokio::task::spawn(async move {
@@ -329,7 +333,7 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(Arc<TlsCertDigest>),
+    NotifyPending(Arc<Tx3Id>),
 }
 
 #[derive(Clone)]
@@ -344,9 +348,9 @@ struct PendingInfo {
 }
 
 struct RelayState {
-    control_channels: HashMap<Arc<TlsCertDigest>, ControlInfo>,
+    control_channels: HashMap<Arc<Tx3Id>, ControlInfo>,
     control_addrs: HashMap<IpAddr, u32>,
-    pending_tokens: HashMap<Arc<TlsCertDigest>, PendingInfo>,
+    pending_tokens: HashMap<Arc<Tx3Id>, PendingInfo>,
 }
 
 impl RelayState {
@@ -411,7 +415,7 @@ async fn process_socket_err(
     tokio::time::timeout_at(timeout, socket.read_exact(&mut token[..]))
         .await??;
 
-    let token = Arc::new(TlsCertDigest(token));
+    let token = Arc::new(Tx3Id(token));
 
     if token == this_cert {
         let control_permit = match control_limit.try_acquire_owned() {
@@ -443,7 +447,7 @@ async fn process_socket_err(
     ring::rand::SystemRandom::new()
         .fill(&mut splice_token[..])
         .map_err(|_| other_err("SystemRandomFailure"))?;
-    let splice_token = Arc::new(TlsCertDigest(splice_token));
+    let splice_token = Arc::new(Tx3Id(splice_token));
 
     enum TokenRes {
         /// we host a control with this cert digest
@@ -543,7 +547,7 @@ async fn process_relay_control(
     )
     .await??;
 
-    let remote_cert = socket.remote_tls_cert_digest().clone();
+    let remote_cert = socket.remote_id().clone();
     tracing::debug!(cert = ?remote_cert, "control stream established");
 
     let (ctrl_send, ctrl_recv) = tokio::sync::mpsc::channel(1);

@@ -62,11 +62,11 @@
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! let tx3_config = tx3::Tx3Config::new().with_bind("tx3-st://127.0.0.1:0");
+//! let tx3_config = tx3::Tx3Config::new().with_bind("tx3:-/st/127.0.0.1:0/");
 //!
 //! let (node, _inbound_con) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 //!
-//! println!("listening on addresses: {:#?}", node.local_addrs());
+//! println!("listening on address: {:?}", node.local_addr());
 //! # }
 //! ```
 //!
@@ -79,10 +79,10 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! let tx3_relay_config = tx3::Tx3RelayConfig::new()
-//!     .with_bind("tx3-rst://127.0.0.1:0");
+//!     .with_bind("tx3:-/rst/127.0.0.1:0/");
 //! let relay = tx3::Tx3Relay::new(tx3_relay_config).await.unwrap();
 //!
-//! println!("relay listening on addresses: {:#?}", relay.local_addrs());
+//! println!("relay listening on address: {:?}", relay.local_addr());
 //! # }
 //! ```
 //!
@@ -92,18 +92,18 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! # let tx3_relay_config = tx3::Tx3RelayConfig::new()
-//! #     .with_bind("tx3-rst://127.0.0.1:0");
+//! #     .with_bind("tx3:-/rst/127.0.0.1:0/");
 //! # let relay = tx3::Tx3Relay::new(tx3_relay_config).await.unwrap();
-//! # let relay_addr = relay.local_addrs()[0].to_owned();
+//! # let relay_addr = relay.local_addr().clone();
 //! # let relay_addr = &relay_addr;
 //! // set relay_addr to your relay address, something like:
-//! // let relay_addr = "tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw";
+//! // let relay_addr = "tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141/";
 //!
 //! let tx3_config = tx3::Tx3Config::new().with_bind(relay_addr);
 //!
 //! let (node, _inbound_con) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 //!
-//! println!("listening on addresses: {:#?}", node.local_addrs());
+//! println!("listening on address: {:?}", node.local_addr());
 //! # }
 //! ```
 //!
@@ -115,9 +115,9 @@
 //! # use tokio::io::AsyncReadExt;
 //! # use tokio::io::AsyncWriteExt;
 //! // create a listening node
-//! let tx3_config = tx3::Tx3Config::new().with_bind("tx3-st://127.0.0.1:0");
+//! let tx3_config = tx3::Tx3Config::new().with_bind("tx3:-/st/127.0.0.1:0/");
 //! let (node1, mut recv1) = tx3::Tx3Node::new(tx3_config).await.unwrap();
-//! let addr1 = node1.local_addrs()[0].to_owned();
+//! let addr1 = node1.local_addr().clone();
 //!
 //! // listen for incoming connections
 //! let task = tokio::task::spawn(async move {

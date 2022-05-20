@@ -18,10 +18,11 @@ async fn smoke_test_st() {
     init_tracing();
 
     let (node1, mut recv1) =
-        Tx3Node::new(Tx3Config::default().with_bind("tx3-st://127.0.0.1:0"))
+        Tx3Node::new(Tx3Config::default().with_bind("tx3:-/st/127.0.0.1:0/"))
             .await
             .unwrap();
-    let addr1 = node1.local_addrs()[0].to_owned();
+    let addr1 = node1.local_addr().clone();
+    tracing::info!(%addr1);
 
     let rtask = tokio::task::spawn(async move {
         let mut con = recv1.recv().await.unwrap().accept().await.unwrap();
@@ -47,17 +48,19 @@ async fn smoke_test_rst() {
     init_tracing();
 
     let relay = Tx3Relay::new(
-        Tx3RelayConfig::default().with_bind("tx3-rst://127.0.0.1:0"),
+        Tx3RelayConfig::default().with_bind("tx3:-/rst/127.0.0.1:0/"),
     )
     .await
     .unwrap();
-    let addr_r = relay.local_addrs()[0].to_owned();
+    let addr_r = relay.local_addr().clone();
+    tracing::info!(%addr_r);
 
     let (node1, mut recv1) =
         Tx3Node::new(Tx3Config::default().with_bind(&addr_r))
             .await
             .unwrap();
-    let addr1 = node1.local_addrs()[0].to_owned();
+    let addr1 = node1.local_addr().clone();
+    tracing::info!(%addr1);
 
     let rtask = tokio::task::spawn(async move {
         let mut con = recv1.recv().await.unwrap().accept().await.unwrap();
