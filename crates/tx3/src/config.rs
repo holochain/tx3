@@ -19,11 +19,9 @@ pub struct Tx3Config {
     /// Currently, we support the following stacks:
     ///
     /// - `st` for binding to local tcp network interfaces
+    ///   - e.g.: `tx3:-/st/0.0.0.0:0/`
     /// - `rst` for binding through a remote relay tcp splicer
-    ///
-    /// The bind point is supplied following a forward slash ('/'), e.g.:
-    ///   - `tx3:-/st/0.0.0.0:0`
-    ///   - `tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141`
+    ///   - e.g.: `tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141/`
     #[serde(default)]
     pub bind: Vec<Arc<Tx3Addr>>,
 

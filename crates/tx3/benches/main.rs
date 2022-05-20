@@ -3,6 +3,7 @@ use futures::future::try_join_all;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tx3::relay::*;
 use tx3::*;
 
 const COUNT: usize = 3;

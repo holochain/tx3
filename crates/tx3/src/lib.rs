@@ -23,7 +23,7 @@
 //! behind NATs. The clients negotiate end-to-end TLS over these spliced
 //! streams, ensuring the relay server or any MITM has no access to the
 //! plaintext. (If you want to learn more about the relay protocol, see
-//! the [Tx3Relay] docs.)
+//! the [crate::relay] docs.)
 //!
 //! ```text
 //!        +-------+
@@ -45,7 +45,7 @@
 //! E.g.
 //!
 //! ```text
-//! tx3-rst://127.0.0.1:38141/EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw
+//! tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141/
 //! ```
 //!
 //! Nodes that are directly addressable, or can configure port-forwarding are
@@ -78,9 +78,9 @@
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! let tx3_relay_config = tx3::Tx3RelayConfig::new()
+//! let tx3_relay_config = tx3::relay::Tx3RelayConfig::new()
 //!     .with_bind("tx3:-/rst/127.0.0.1:0/");
-//! let relay = tx3::Tx3Relay::new(tx3_relay_config).await.unwrap();
+//! let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 //!
 //! println!("relay listening on address: {:?}", relay.local_addr());
 //! # }
@@ -91,9 +91,9 @@
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! # let tx3_relay_config = tx3::Tx3RelayConfig::new()
+//! # let tx3_relay_config = tx3::relay::Tx3RelayConfig::new()
 //! #     .with_bind("tx3:-/rst/127.0.0.1:0/");
-//! # let relay = tx3::Tx3Relay::new(tx3_relay_config).await.unwrap();
+//! # let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 //! # let relay_addr = relay.local_addr().clone();
 //! # let relay_addr = &relay_addr;
 //! // set relay_addr to your relay address, something like:
@@ -185,8 +185,7 @@ pub use connection::*;
 mod node;
 pub use node::*;
 
-mod relay;
-pub use relay::*;
+pub mod relay;
 
 #[cfg(test)]
 mod relay_test;
