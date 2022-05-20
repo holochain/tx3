@@ -16,15 +16,37 @@
 //! - TODO - connection rate limiting on both outgoing and incoming data
 //! - TODO - message multiplexing to mitigate head-of-line blocking
 
+/// Re-exported dependencies
+pub mod deps {
+    pub use tx3;
+}
+
+#[doc(inline)]
+pub use tx3::other_err;
+
+#[doc(inline)]
+pub use tx3::Tx3Id;
+
+#[doc(inline)]
+pub use tx3::Tx3Addr;
+
 pub mod types;
 
 pub mod pool;
 
+#[doc(inline)]
+pub use pool::Tx3Recv;
+
+#[doc(inline)]
+pub use pool::Tx3Pool;
+
+/*
 mod tx3_pool_imp;
 pub use tx3_pool_imp::*;
 
 #[doc(inline)]
 pub use types::PoolConfig;
+*/
 
 /*
 use bytes::Buf;

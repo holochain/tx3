@@ -1,47 +1,179 @@
-//! Generic connection pool types.
+//! Tx3 connection pool types.
 
 use crate::types::*;
+use crate::*;
+use bytes::Buf;
 use std::future::Future;
 use std::io::Result;
 use std::sync::Arc;
 
-/// Generic connection pool.
-pub struct Pool<I: PoolImp> {
-    imp: Arc<I>,
+mod pool_state;
+use pool_state::*;
+
+/// Tx3 pool inbound message receiver.
+pub struct Tx3Recv {
+    // safe to be unbounded, because pool logic keeps send permits
+    // in the inbound msg struct... we only drop these permits
+    // when the user of this recv instance actually pulls a message.
+    inbound_recv: tokio::sync::mpsc::UnboundedReceiver<InboundMsg>,
 }
 
-impl<I: PoolImp> Pool<I> {
-    /// Construct a new generic connection pool.
-    pub fn new(_config: PoolConfig, imp: Arc<I>) -> Self {
-        Self { imp }
+impl Tx3Recv {
+    /// Get the next inbound message received by this pool instance.
+    pub async fn recv(&mut self) -> Option<(Arc<Tx3Id>, BytesList)> {
+        self.inbound_recv.recv().await.map(|msg| msg.extract())
+    }
+}
+
+/// Handle allowing a particular binding (listener) to be dropped.
+/// If this handle is dropped, the binding will remain open, only terminating
+/// on error, or if the process is shut down.
+pub struct BindHnd {
+    bind_term: Term,
+}
+
+impl BindHnd {
+    /// Terminate this specific listener, the rest of the pool will remain
+    /// active, and any open connections will remain active, we
+    /// just stop accepting incoming connections from this listener.
+    pub fn terminate(&self) {
+        self.bind_term.term();
     }
 
-    /// Access the given implementation
+    // -- private -- //
+
+    fn priv_new(bind_term: Term) -> Self {
+        Self { bind_term }
+    }
+}
+
+/// Tx3 connection pool.
+pub struct Tx3Pool<I: Tx3PoolImp> {
+    config: Arc<Tx3PoolConfig>,
+    tls: tx3::tls::TlsConfig,
+    pool_term: Term,
+    imp: Arc<I>,
+    out_byte_limit: Arc<tokio::sync::Semaphore>,
+    cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
+}
+
+impl<I: Tx3PoolImp> Tx3Pool<I> {
+    /// Construct a new generic connection pool.
+    pub async fn new(
+        mut config: Tx3PoolConfig,
+        imp: Arc<I>,
+    ) -> Result<(Arc<Self>, Tx3Recv)> {
+        let tls = match config.tls.take() {
+            Some(tls) => tls,
+            None => tx3::tls::TlsConfigBuilder::default().build()?,
+        };
+
+        // non-listening node used for outgoing connections
+        let _out_node =
+            tx3::Tx3Node::new(tx3::Tx3Config::default().with_tls(tls.clone()))
+                .await?;
+
+        let pool_term = Term::new(None);
+
+        let out_byte_limit =
+            Arc::new(tokio::sync::Semaphore::new(config.max_out_byte_count));
+        let (inbound_send, inbound_recv) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (cmd_send, cmd_recv) = tokio::sync::mpsc::unbounded_channel();
+        tokio::task::spawn(pool_state_task(
+            imp.clone(),
+            inbound_send,
+            cmd_recv,
+        ));
+        let this = Self {
+            config: Arc::new(config),
+            tls,
+            pool_term,
+            imp,
+            out_byte_limit,
+            cmd_send,
+        };
+
+        let recv = Tx3Recv { inbound_recv };
+
+        Ok((Arc::new(this), recv))
+    }
+
+    /// Access the internal implementation.
     pub fn as_imp(&self) -> &Arc<I> {
         &self.imp
+    }
+
+    /// Get the address at which this pool is externally reachable.
+    pub fn local_addr(&self) -> &Arc<Tx3Addr> {
+        todo!()
+    }
+
+    /// Bind a local listener into this pool, and begin listening
+    /// to incoming messages.
+    pub async fn bind<A: tx3::IntoAddr>(&self, bind: A) -> Result<BindHnd> {
+        let bind_term = Term::new(None);
+        let _node = tx3::Tx3Node::new(
+            tx3::Tx3Config::default()
+                .with_bind(bind)
+                .with_tls(self.tls.clone()),
+        )
+        .await?;
+        Ok(BindHnd::priv_new(bind_term))
     }
 
     /// Enqueue an outgoing message for send to a remote peer.
     pub fn send<B: Into<BytesList>>(
         &self,
-        _peer_id: Arc<I::Id>,
-        _content: B,
+        peer_id: Arc<Tx3Id>,
+        content: B,
+        timeout: std::time::Duration,
     ) -> impl Future<Output = Result<()>> + 'static + Send {
-        async move { todo!() }
-    }
+        let pool_term = self.pool_term.clone();
+        let max_msg_byte_count = self.config.max_msg_byte_count;
+        let content = content.into();
+        let timeout_at = tokio::time::Instant::now() + timeout;
+        let out_byte_limit = self.out_byte_limit.clone();
+        let cmd_send = self.cmd_send.clone();
+        async move {
+            let rem = content.remaining();
+            if rem > max_msg_byte_count as usize {
+                return Err(other_err("MsgTooLarge"));
+            }
 
-    /// Try to accept an incoming connection. Note, if we've reached
-    /// our incoming connection limit, this future will be dropped
-    /// without being awaited (TooManyConnections).
-    pub fn accept(&self, _accept_fut: I::AcceptFut) {
-        todo!()
+            tokio::select! {
+                _ = pool_term.on_term() => Err(other_err("PoolClosed")),
+                r = tokio::time::timeout_at(timeout_at, async move {
+                    let permit = out_byte_limit
+                        .acquire_many_owned(rem as u32)
+                        .await
+                        .map_err(|_| other_err("PoolClosed"))?;
+
+                    let (resolve, result) = tokio::sync::oneshot::channel();
+
+                    let msg = OutboundMsg {
+                        _permit: permit,
+                        peer_id,
+                        content,
+                        timeout_at,
+                        resolve
+                    };
+
+                    cmd_send
+                        .send(PoolStateCmd::OutboundMsg(msg))
+                        .map_err(|_| other_err("PoolClosed"))?;
+
+                    result.await.map_err(|_| other_err("PoolClosed"))?
+                }) => r.map_err(|_| other_err("Timeout"))?,
+            }
+        }
     }
 
     /// Immediately terminate all connections, stopping all processing, both
     /// incoming and outgoing. This is NOT a graceful shutdown, and probably
     /// should only be used in testing scenarios.
     pub fn terminate(&self) {
-        todo!()
+        self.pool_term.term();
     }
 }
 

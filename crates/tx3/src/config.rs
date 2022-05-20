@@ -57,6 +57,12 @@ impl Tx3Config {
         self
     }
 
+    /// Specify a tls config to use.
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     // -- private -- //
 
     /// privately, the option is always some, so we can unwrap the ref

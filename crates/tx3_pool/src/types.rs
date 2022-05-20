@@ -1,73 +1,211 @@
 //! Support types for Tx3Pool implementations.
 
+use crate::*;
 use bytes::Buf;
-use std::fmt::Debug;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::future::Future;
-use std::hash::Hash;
 use std::io::Result;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::Arc;
 use std::task::Poll;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
 
 pub(crate) const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
-
-/// Tx3 helper until `std::io::Error::other()` is stablized.
-pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
-    error: E,
-) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, error)
-}
-
-/// Marker trait for something that can act as a remote connection identifier.
-pub trait Id:
-    'static + Send + Sync + Debug + PartialEq + Eq + PartialOrd + Ord + Hash
-{
-}
 
 /// Receive an incoming message from a remote node.
 /// Gives mutable access to the internal BytesList, for parsing.
 /// The permit limiting the max read bytes in memory is bound to this struct.
 /// Drop this to allow that permit to be freed, allowing additional
 /// data to be read by the input readers.
-pub struct InboundMsg<K: Id> {
+pub(crate) struct InboundMsg {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    peer_id: Arc<K>,
+    peer_id: Arc<Tx3Id>,
     content: BytesList,
 }
 
-impl<K: Id> InboundMsg<K> {
+impl InboundMsg {
     /// Extract the contents of this message, dropping the permit,
     /// thereby allowing additional messages to be buffered.
-    pub fn extract(self) -> (Arc<K>, BytesList) {
+    pub fn extract(self) -> (Arc<Tx3Id>, BytesList) {
         (self.peer_id, self.content)
     }
 }
 
-/// When implementing a pool, the pool needs to be able to make certain
-/// calls out to the implementor. This PoolImp trait provides those calls.
-pub trait PoolImp: 'static + Send + Sync {
-    /// A type which uniquely identifies an endpoint.
-    type Id: Id;
+/// Tx3Pool operates using peer_ids. When it wants to establish a new
+/// outgoing connection, it must be able to look up an addr by a peer_id.
+pub trait AddrStore: 'static + Send + Sync {
+    /// Future result type from looking up an addr.
+    type LookupAddrFut: 'static + Send + Future<Output = Result<Arc<Tx3Addr>>>;
 
-    /// The backend system transport connection type.
-    type Connection: 'static + Send + AsyncRead + AsyncWrite + Unpin;
+    /// Look up a Tx3Addr from a given Tx3Id.
+    fn lookup_addr(&self, id: &Arc<Tx3Id>) -> Self::LookupAddrFut;
+}
 
-    /// A future which resolves into an "accept" result.
-    type AcceptFut: 'static
-        + Send
-        + Future<Output = Result<(Self::Id, Self::Connection)>>;
+/// A simple in-memory address store.
+pub struct AddrStoreMem(Mutex<HashMap<Arc<Tx3Id>, Arc<Tx3Addr>>>);
 
-    /// A future returned by the "connect" function.
-    type ConnectFut: 'static + Send + Future<Output = Result<Self::Connection>>;
+impl Default for AddrStoreMem {
+    fn default() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+}
 
-    /// Establish a new outgoing connection to a remote peer.
-    fn connect(&self, id: Arc<Self::Id>) -> Self::ConnectFut;
+impl AddrStoreMem {
+    /// Set an item in the memory address store.
+    pub fn set<A: tx3::IntoAddr>(&self, addr: A) {
+        let addr = addr.into_addr();
+        self.access(move |inner| {
+            if let Some(id) = &addr.id {
+                inner.insert(id.clone(), addr);
+            }
+        });
+    }
 
-    /// Receive an incoming message from a remote node.
-    fn incoming(&self, msg: InboundMsg<Self::Id>);
+    // -- private -- //
+    fn access<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<Arc<Tx3Id>, Arc<Tx3Addr>>) -> R,
+    {
+        f(&mut *self.0.lock())
+    }
+}
+
+impl AddrStore for AddrStoreMem {
+    type LookupAddrFut = futures::future::Ready<Result<Arc<Tx3Addr>>>;
+
+    fn lookup_addr(&self, id: &Arc<Tx3Id>) -> Self::LookupAddrFut {
+        futures::future::ready(self.access(|inner| match inner.get(id) {
+            Some(addr) => Ok(addr.clone()),
+            None => Err(other_err(format!("NoAddrForId({})", id))),
+        }))
+    }
+}
+
+/// Tx3Pool hooks trait for calls / events to the implementor.
+pub trait PoolHooks: 'static + Send + Sync {
+    /// The pool is now externally reachable at a different address.
+    fn new_addr(&self, addr: Tx3Addr) {
+        let _addr = addr;
+    }
+}
+
+/// A default hooks implementation that does nothing.
+#[derive(Default)]
+pub struct PoolHooksNull;
+
+impl PoolHooks for PoolHooksNull {}
+
+/// Implementation trait for configuring Tx3Pool sub types.
+pub trait Tx3PoolImp: 'static + Send + Sync {
+    /// The address store type to use in this tx3 pool instance.
+    type AddrStore: AddrStore;
+
+    /// The pool hooks type associated with this tx3 pool instance.
+    type PoolHooks: PoolHooks;
+
+    /// Get the address store associated with this implementation instance.
+    fn get_addr_store(&self) -> &Arc<Self::AddrStore>;
+
+    /// Get the pool hooks accosiated with this implementation instance.
+    fn get_pool_hooks(&self) -> &Arc<Self::PoolHooks>;
+}
+
+/// A provided default Tx3PoolImp struct with sane defaults.
+#[derive(Default)]
+pub struct Tx3PoolImpDefault {
+    addr_store: Arc<AddrStoreMem>,
+    pool_hooks: Arc<PoolHooksNull>,
+}
+
+impl Tx3PoolImp for Tx3PoolImpDefault {
+    type PoolHooks = PoolHooksNull;
+    type AddrStore = AddrStoreMem;
+
+    fn get_addr_store(&self) -> &Arc<Self::AddrStore> {
+        &self.addr_store
+    }
+
+    fn get_pool_hooks(&self) -> &Arc<Self::PoolHooks> {
+        &self.pool_hooks
+    }
+}
+
+/// Configuration for a tx3 pool instance.
+#[non_exhaustive]
+pub struct Tx3PoolConfig {
+    /// Tls configuration to use for this tx3 pool, or None
+    /// indicating we should generate a new ephemeral certificate.
+    pub tls: Option<tx3::tls::TlsConfig>,
+
+    /// Maximum byte length of a single message.
+    /// (Currently cannot be > u32::MAX >> 6 until multiplexing is implemented).
+    /// Default: u32::MAX >> 6.
+    pub max_msg_byte_count: u32,
+
+    /// How many conncurrent outgoing connections are allowed.
+    /// Default: 64.
+    pub max_out_con_count: u32,
+
+    /// How many concurrent incoming connections are allowed.
+    /// Default: 64.
+    pub max_in_con_count: u32,
+
+    /// How many bytes can build up in our outgoing buffer before
+    /// we start experiencing backpressure.
+    /// (Cannot be > usize::MAX >> 3 do to tokio semaphore limitations)
+    /// Default: u32::MAX >> 6.
+    pub max_out_byte_count: usize,
+
+    /// How many bytes can build up in our incoming buffer before
+    /// we stop reading to trigger backpressure.
+    /// (Cannot be > usize::MAX >> 3 do to tokio semaphore limitations)
+    /// Default: u32::MAX >> 6.
+    pub max_in_byte_count: usize,
+
+    /// Connect timeout after which to abandon establishing new connections,
+    /// or handshaking incoming connections.
+    /// Default: 20 seconds.
+    pub connect_timeout: std::time::Duration,
+
+    /// Idle timeout after which to close the connection.
+    /// Default: 20 seconds.
+    pub idle_timeout: std::time::Duration,
+
+    /// Time an outgoing message is allowed to remain queued but un-sent.
+    /// This timer stops counting as soon as it is claimed by a send worker.
+    /// Default: 20 seconds.
+    pub msg_send_timeout: std::time::Duration,
+
+    /// NOT PUB -- both sides should match -- someday negotiate? --
+    /// The max message read/write per connection before closing.
+    /// Default: 64.
+    #[allow(dead_code)]
+    max_read_write_msg_count_per_con: u64,
+
+    /// NOT PUB -- both sides should match -- someday negotiate? --
+    /// The max byte count that can be read/written per con before closing.
+    /// Default: u32::MAX >> 6.
+    #[allow(dead_code)]
+    max_read_write_byte_count_per_con: u64,
+}
+
+impl Default for Tx3PoolConfig {
+    fn default() -> Self {
+        Self {
+            tls: None,
+            max_msg_byte_count: FI_LEN_MASK,
+            max_out_con_count: 64,
+            max_in_con_count: 64,
+            max_out_byte_count: FI_LEN_MASK as usize,
+            max_in_byte_count: FI_LEN_MASK as usize,
+            connect_timeout: std::time::Duration::from_secs(20),
+            idle_timeout: std::time::Duration::from_secs(20),
+            msg_send_timeout: std::time::Duration::from_secs(20),
+            max_read_write_msg_count_per_con: 64,
+            max_read_write_byte_count_per_con: FI_LEN_MASK as u64,
+        }
+    }
 }
 
 /// A set of distinct chunks of bytes that can be treated as a single unit
@@ -197,7 +335,7 @@ impl bytes::Buf for BytesList {
 
 /// Terminal notification helper utility.
 #[derive(Clone)]
-pub struct Term {
+pub(crate) struct Term {
     term: Arc<atomic::AtomicBool>,
     sig: Arc<tokio::sync::Notify>,
     trgr: Arc<dyn Fn() + 'static + Send + Sync>,
@@ -221,10 +359,12 @@ impl Term {
         (self.trgr)();
     }
 
+    /*
     /// Returns `true` if termination has been triggered.
     pub fn is_term(&self) -> bool {
         self.term.load(atomic::Ordering::Acquire)
     }
+    */
 
     /// Returns a future that will resolve when termination is triggered.
     pub fn on_term(
@@ -252,6 +392,57 @@ impl Term {
             Poll::Pending
         })
     }
+}
+
+/*
+use std::fmt::Debug;
+use std::future::Future;
+use std::hash::Hash;
+use std::io::Result;
+use std::pin::Pin;
+use std::sync::atomic;
+use std::sync::Arc;
+use std::task::Poll;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+
+pub(crate) const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
+
+/// Tx3 helper until `std::io::Error::other()` is stablized.
+pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
+    error: E,
+) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, error)
+}
+
+/// Marker trait for something that can act as a remote connection identifier.
+pub trait Id:
+    'static + Send + Sync + Debug + PartialEq + Eq + PartialOrd + Ord + Hash
+{
+}
+
+/// When implementing a pool, the pool needs to be able to make certain
+/// calls out to the implementor. This PoolImp trait provides those calls.
+pub trait PoolImp: 'static + Send + Sync {
+    /// A type which uniquely identifies an endpoint.
+    type Id: Id;
+
+    /// The backend system transport connection type.
+    type Connection: 'static + Send + AsyncRead + AsyncWrite + Unpin;
+
+    /// A future which resolves into an "accept" result.
+    type AcceptFut: 'static
+        + Send
+        + Future<Output = Result<(Self::Id, Self::Connection)>>;
+
+    /// A future returned by the "connect" function.
+    type ConnectFut: 'static + Send + Future<Output = Result<Self::Connection>>;
+
+    /// Establish a new outgoing connection to a remote peer.
+    fn connect(&self, id: Arc<Self::Id>) -> Self::ConnectFut;
+
+    /// Receive an incoming message from a remote node.
+    fn incoming(&self, msg: InboundMsg<Self::Id>);
 }
 
 /// Configuration for a [crate::pool::Pool] instance.
@@ -325,6 +516,9 @@ impl Default for PoolConfig {
         }
     }
 }
+*/
+
+// -- old -- //
 
 /*
 /// Common types.
