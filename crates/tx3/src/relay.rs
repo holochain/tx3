@@ -11,7 +11,7 @@
 //! relay server agrees to relay, a single "all-clear" byte is sent back in
 //! response.
 //!
-//! ```no-compile
+//! ```text
 //! client                 relay server
 //! --+---                 --------+---
 //!   | --- control open (TLS) --> |
@@ -32,7 +32,7 @@
 //! The server splices the connections together, and the client and peer
 //! proceed to handshake TLS over the resulting tunnelled connection.
 //!
-//! ```no-compile
+//! ```text
 //! client                  relay server                       peer
 //! --+---                  ------+-----                       --+-
 //!   |                           | <-- tls digest over (TCP) -- |
@@ -41,6 +41,22 @@
 //!   |          relay server splices TCP connections            |
 //!   | <------------------- TLS handshaking ------------------> |
 //! ```
+//!
+//! When the relay server informs the client of an incoming connection,
+//! it prefixes the splice token with the origin socket address.
+//!
+//! The full message is in the form:
+//!
+//! ```text
+//! | IP               | PORT    | SPLICE_TOKEN                     |
+//! |------------------|---------|----------------------------------|
+//! | XXXXXXXXXXXXXXXX | XX      | XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX |
+//! | 16 bytes         | 2 bytes | 32 bytes                         |
+//! ```
+//!
+//! - `IP` - 16 byte ipv6 or mapped ipv4 address
+//! - `PORT` - 2 byte network byte-order port
+//! - `SPLICE_TOKEN` - 32 byte splice token
 
 use crate::tls::*;
 use crate::*;
