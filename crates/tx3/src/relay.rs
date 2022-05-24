@@ -177,19 +177,19 @@ impl std::ops::DerefMut for Tx3RelayConfig {
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
     addr: Arc<Tx3Addr>,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Term,
 }
 
 impl Drop for Tx3Relay {
     fn drop(&mut self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.term();
     }
 }
 
 impl Tx3Relay {
     /// Construct/bind a new Tx3Relay server instance with given config
     pub async fn new(mut config: Tx3RelayConfig) -> Result<Self> {
-        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Term::new(None);
 
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
@@ -276,7 +276,7 @@ async fn bind_tx3_rst(
     state: RelayStateSync,
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Term,
 ) -> Result<Vec<Arc<Tx3Stack>>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
@@ -289,9 +289,7 @@ async fn bind_tx3_rst(
     tokio::task::spawn(async move {
         loop {
             let res = tokio::select! {
-                biased;
-
-                _ = shutdown.notified() => break,
+                _ = shutdown.on_term() => break,
                 r = listener.accept() => r,
             };
 
@@ -319,14 +317,22 @@ async fn bind_tx3_rst(
                         }
                         Ok(socket) => socket,
                     };
-                    tokio::task::spawn(process_socket(
+
+                    let shutdown = shutdown.clone();
+                    let process_socket_fut = process_socket(
                         config.clone(),
                         socket,
                         ip,
                         state.clone(),
                         con_permit,
                         control_limit.clone(),
-                    ));
+                    );
+                    tokio::task::spawn(async move {
+                        tokio::select! {
+                            _ = shutdown.on_term() => (),
+                            _ = process_socket_fut => (),
+                        }
+                    });
                 }
             }
         }
