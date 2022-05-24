@@ -121,7 +121,7 @@
 //!
 //! // listen for incoming connections
 //! let task = tokio::task::spawn(async move {
-//!     let acceptor = recv1.recv().await.unwrap();
+//!     let (acceptor, _addr) = recv1.recv().await.unwrap();
 //!
 //!     // in production code we might want to spawn this so we can
 //!     // receive more connections, handling their handshakes in paralel

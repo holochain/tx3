@@ -89,7 +89,8 @@ impl BenchTx3st {
         let recv = tokio::task::spawn(async move {
             let mut out = Vec::with_capacity(COUNT);
             for _ in 0..COUNT {
-                out.push(recv.recv().await.unwrap().accept().await.unwrap());
+                let (accept, _addr) = recv.recv().await.unwrap();
+                out.push(accept.accept().await.unwrap());
             }
             out
         });
@@ -163,7 +164,8 @@ impl BenchTx3rst {
         let recv = tokio::task::spawn(async move {
             let mut out = Vec::with_capacity(COUNT);
             for _ in 0..COUNT {
-                out.push(recv.recv().await.unwrap().accept().await.unwrap());
+                let (accept, _addr) = recv.recv().await.unwrap();
+                out.push(accept.accept().await.unwrap());
             }
             out
         });

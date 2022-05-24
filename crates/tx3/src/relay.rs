@@ -298,7 +298,6 @@ async fn bind_tx3_rst(
                     tracing::warn!(?err, "accept error");
                 }
                 Ok((socket, addr)) => {
-                    let ip = addr.ip();
                     let con_permit = match inbound_limit
                         .clone()
                         .try_acquire_owned()
@@ -322,7 +321,7 @@ async fn bind_tx3_rst(
                     let process_socket_fut = process_socket(
                         config.clone(),
                         socket,
-                        ip,
+                        addr,
                         state.clone(),
                         con_permit,
                         control_limit.clone(),
@@ -342,7 +341,7 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(Arc<Tx3Id>),
+    NotifyPending(Arc<Tx3Id>, SocketAddr),
 }
 
 #[derive(Clone)]
@@ -392,14 +391,20 @@ impl RelayStateSync {
 async fn process_socket(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
 ) {
-    if let Err(err) =
-        process_socket_err(config, socket, ip, state, con_permit, control_limit)
-            .await
+    if let Err(err) = process_socket_err(
+        config,
+        socket,
+        rem_addr,
+        state,
+        con_permit,
+        control_limit,
+    )
+    .await
     {
         tracing::debug!(?err, "process_socket error");
     }
@@ -408,7 +413,7 @@ async fn process_socket(
 async fn process_socket_err(
     config: Arc<Tx3RelayConfig>,
     mut socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
@@ -442,7 +447,7 @@ async fn process_socket_err(
         return process_relay_control(
             config,
             socket,
-            ip,
+            rem_addr,
             state,
             timeout,
             con_permit,
@@ -521,7 +526,7 @@ async fn process_socket_err(
 
             // notify the control stream of the pending connection
             let _ = ctrl_send
-                .send(ControlCmd::NotifyPending(splice_token))
+                .send(ControlCmd::NotifyPending(splice_token, rem_addr))
                 .await;
         }
         TokenRes::HaveConToken(mut socket, mut socket2, relay_permit) => {
@@ -544,7 +549,7 @@ async fn process_socket_err(
 async fn process_relay_control(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     timeout: tokio::time::Instant,
     con_permit: tokio::sync::OwnedSemaphorePermit,
@@ -570,7 +575,7 @@ async fn process_relay_control(
 
         state.access(move |state| {
             {
-                let ip_count = state.control_addrs.entry(ip).or_default();
+                let ip_count = state.control_addrs.entry(rem_addr.ip()).or_default();
                 if *ip_count < config.max_control_streams_per_ip {
                     *ip_count += 1;
                 } else {
@@ -609,7 +614,7 @@ async fn process_relay_control(
         process_relay_control_inner(socket, state.clone(), ctrl_recv).await;
 
     state.access(|state| {
-        if match state.control_addrs.get_mut(&ip) {
+        if match state.control_addrs.get_mut(&rem_addr.ip()) {
             Some(ip_count) => {
                 if *ip_count > 0 {
                     *ip_count -= 1;
@@ -618,7 +623,7 @@ async fn process_relay_control(
             }
             None => false,
         } {
-            state.control_addrs.remove(&ip);
+            state.control_addrs.remove(&rem_addr.ip());
         }
 
         state.control_channels.remove(&remote_cert);
@@ -665,8 +670,17 @@ async fn process_relay_control_inner(
         _ = async move {
             while let Some(cmd) = ctrl_recv.recv().await {
                 match cmd {
-                    ControlCmd::NotifyPending(splice_token) => {
-                        write.write_all(&splice_token[..]).await?;
+                    ControlCmd::NotifyPending(splice_token, rem_addr) => {
+                        let ip = match rem_addr.ip() {
+                            IpAddr::V4(a) => a.to_ipv6_mapped().octets(),
+                            IpAddr::V6(a) => a.octets(),
+                        };
+                        let port = rem_addr.port();
+                        let mut out = [0_u8; 16 + 2 + 32];
+                        out[..16].copy_from_slice(&ip[..]);
+                        out[16..18].copy_from_slice(&port.to_be_bytes());
+                        out[18..].copy_from_slice(&splice_token[..]);
+                        write.write_all(&out[..]).await?;
                     }
                 }
             }
