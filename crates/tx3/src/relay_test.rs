@@ -177,9 +177,9 @@ async fn relay_test_max_relays_per_control() {
         for _ in 0..2 {
             tracing::info!("got one connection");
 
-            let a = main_recv.recv().await.unwrap();
+            let (accept, _addr) = main_recv.recv().await.unwrap();
             all.push(tokio::task::spawn(async move {
-                let mut socket = a.accept().await.unwrap();
+                let mut socket = accept.accept().await.unwrap();
                 let mut got = [0; 5];
                 socket.read_exact(&mut got).await.unwrap();
                 assert_eq!(b"hello", &got[..]);

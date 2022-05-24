@@ -11,7 +11,7 @@
 //! relay server agrees to relay, a single "all-clear" byte is sent back in
 //! response.
 //!
-//! ```no-compile
+//! ```text
 //! client                 relay server
 //! --+---                 --------+---
 //!   | --- control open (TLS) --> |
@@ -32,7 +32,7 @@
 //! The server splices the connections together, and the client and peer
 //! proceed to handshake TLS over the resulting tunnelled connection.
 //!
-//! ```no-compile
+//! ```text
 //! client                  relay server                       peer
 //! --+---                  ------+-----                       --+-
 //!   |                           | <-- tls digest over (TCP) -- |
@@ -41,6 +41,22 @@
 //!   |          relay server splices TCP connections            |
 //!   | <------------------- TLS handshaking ------------------> |
 //! ```
+//!
+//! When the relay server informs the client of an incoming connection,
+//! it prefixes the splice token with the origin socket address.
+//!
+//! The full message is in the form:
+//!
+//! ```text
+//! | IP               | PORT    | SPLICE_TOKEN                     |
+//! |------------------|---------|----------------------------------|
+//! | XXXXXXXXXXXXXXXX | XX      | XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX |
+//! | 16 bytes         | 2 bytes | 32 bytes                         |
+//! ```
+//!
+//! - `IP` - 16 byte ipv6 or mapped ipv4 address
+//! - `PORT` - 2 byte network byte-order port
+//! - `SPLICE_TOKEN` - 32 byte splice token
 
 use crate::tls::*;
 use crate::*;
@@ -177,19 +193,19 @@ impl std::ops::DerefMut for Tx3RelayConfig {
 pub struct Tx3Relay {
     config: Arc<Tx3RelayConfig>,
     addr: Arc<Tx3Addr>,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Term,
 }
 
 impl Drop for Tx3Relay {
     fn drop(&mut self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.term();
     }
 }
 
 impl Tx3Relay {
     /// Construct/bind a new Tx3Relay server instance with given config
     pub async fn new(mut config: Tx3RelayConfig) -> Result<Self> {
-        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Term::new(None);
 
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
@@ -276,7 +292,7 @@ async fn bind_tx3_rst(
     state: RelayStateSync,
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Term,
 ) -> Result<Vec<Arc<Tx3Stack>>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
@@ -289,9 +305,7 @@ async fn bind_tx3_rst(
     tokio::task::spawn(async move {
         loop {
             let res = tokio::select! {
-                biased;
-
-                _ = shutdown.notified() => break,
+                _ = shutdown.on_term() => break,
                 r = listener.accept() => r,
             };
 
@@ -300,7 +314,6 @@ async fn bind_tx3_rst(
                     tracing::warn!(?err, "accept error");
                 }
                 Ok((socket, addr)) => {
-                    let ip = addr.ip();
                     let con_permit = match inbound_limit
                         .clone()
                         .try_acquire_owned()
@@ -319,14 +332,22 @@ async fn bind_tx3_rst(
                         }
                         Ok(socket) => socket,
                     };
-                    tokio::task::spawn(process_socket(
+
+                    let shutdown = shutdown.clone();
+                    let process_socket_fut = process_socket(
                         config.clone(),
                         socket,
-                        ip,
+                        addr,
                         state.clone(),
                         con_permit,
                         control_limit.clone(),
-                    ));
+                    );
+                    tokio::task::spawn(async move {
+                        tokio::select! {
+                            _ = shutdown.on_term() => (),
+                            _ = process_socket_fut => (),
+                        }
+                    });
                 }
             }
         }
@@ -336,7 +357,7 @@ async fn bind_tx3_rst(
 }
 
 enum ControlCmd {
-    NotifyPending(Arc<Tx3Id>),
+    NotifyPending(Arc<Tx3Id>, SocketAddr),
 }
 
 #[derive(Clone)]
@@ -386,14 +407,20 @@ impl RelayStateSync {
 async fn process_socket(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
 ) {
-    if let Err(err) =
-        process_socket_err(config, socket, ip, state, con_permit, control_limit)
-            .await
+    if let Err(err) = process_socket_err(
+        config,
+        socket,
+        rem_addr,
+        state,
+        con_permit,
+        control_limit,
+    )
+    .await
     {
         tracing::debug!(?err, "process_socket error");
     }
@@ -402,7 +429,7 @@ async fn process_socket(
 async fn process_socket_err(
     config: Arc<Tx3RelayConfig>,
     mut socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_limit: Arc<tokio::sync::Semaphore>,
@@ -436,7 +463,7 @@ async fn process_socket_err(
         return process_relay_control(
             config,
             socket,
-            ip,
+            rem_addr,
             state,
             timeout,
             con_permit,
@@ -515,7 +542,7 @@ async fn process_socket_err(
 
             // notify the control stream of the pending connection
             let _ = ctrl_send
-                .send(ControlCmd::NotifyPending(splice_token))
+                .send(ControlCmd::NotifyPending(splice_token, rem_addr))
                 .await;
         }
         TokenRes::HaveConToken(mut socket, mut socket2, relay_permit) => {
@@ -538,7 +565,7 @@ async fn process_socket_err(
 async fn process_relay_control(
     config: Arc<Tx3RelayConfig>,
     socket: tokio::net::TcpStream,
-    ip: IpAddr,
+    rem_addr: SocketAddr,
     state: RelayStateSync,
     timeout: tokio::time::Instant,
     con_permit: tokio::sync::OwnedSemaphorePermit,
@@ -564,7 +591,7 @@ async fn process_relay_control(
 
         state.access(move |state| {
             {
-                let ip_count = state.control_addrs.entry(ip).or_default();
+                let ip_count = state.control_addrs.entry(rem_addr.ip()).or_default();
                 if *ip_count < config.max_control_streams_per_ip {
                     *ip_count += 1;
                 } else {
@@ -603,7 +630,7 @@ async fn process_relay_control(
         process_relay_control_inner(socket, state.clone(), ctrl_recv).await;
 
     state.access(|state| {
-        if match state.control_addrs.get_mut(&ip) {
+        if match state.control_addrs.get_mut(&rem_addr.ip()) {
             Some(ip_count) => {
                 if *ip_count > 0 {
                     *ip_count -= 1;
@@ -612,7 +639,7 @@ async fn process_relay_control(
             }
             None => false,
         } {
-            state.control_addrs.remove(&ip);
+            state.control_addrs.remove(&rem_addr.ip());
         }
 
         state.control_channels.remove(&remote_cert);
@@ -659,8 +686,17 @@ async fn process_relay_control_inner(
         _ = async move {
             while let Some(cmd) = ctrl_recv.recv().await {
                 match cmd {
-                    ControlCmd::NotifyPending(splice_token) => {
-                        write.write_all(&splice_token[..]).await?;
+                    ControlCmd::NotifyPending(splice_token, rem_addr) => {
+                        let ip = match rem_addr.ip() {
+                            IpAddr::V4(a) => a.to_ipv6_mapped().octets(),
+                            IpAddr::V6(a) => a.octets(),
+                        };
+                        let port = rem_addr.port();
+                        let mut out = [0_u8; 16 + 2 + 32];
+                        out[..16].copy_from_slice(&ip[..]);
+                        out[16..18].copy_from_slice(&port.to_be_bytes());
+                        out[18..].copy_from_slice(&splice_token[..]);
+                        write.write_all(&out[..]).await?;
                     }
                 }
             }

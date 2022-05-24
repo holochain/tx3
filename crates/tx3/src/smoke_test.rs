@@ -26,7 +26,8 @@ async fn smoke_test_st() {
     tracing::info!(%addr1);
 
     let rtask = tokio::task::spawn(async move {
-        let mut con = recv1.recv().await.unwrap().accept().await.unwrap();
+        let (accept, _addr) = recv1.recv().await.unwrap();
+        let mut con = accept.accept().await.unwrap();
         let mut buf = [0; 5];
         con.read_exact(&mut buf[..]).await.unwrap();
         assert_eq!(b"hello", &buf[..]);
@@ -64,7 +65,8 @@ async fn smoke_test_rst() {
     tracing::info!(%addr1);
 
     let rtask = tokio::task::spawn(async move {
-        let mut con = recv1.recv().await.unwrap().accept().await.unwrap();
+        let (accept, _addr) = recv1.recv().await.unwrap();
+        let mut con = accept.accept().await.unwrap();
         let mut buf = [0; 5];
         con.read_exact(&mut buf[..]).await.unwrap();
         assert_eq!(b"hello", &buf[..]);
