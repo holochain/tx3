@@ -5,7 +5,11 @@ use crate::*;
 use bytes::Buf;
 use std::future::Future;
 use std::io::Result;
+use std::net::SocketAddr;
 use std::sync::Arc;
+
+mod bindings;
+use bindings::*;
 
 mod pool_state;
 use pool_state::*;
@@ -20,7 +24,9 @@ pub struct Tx3Recv {
 
 impl Tx3Recv {
     /// Get the next inbound message received by this pool instance.
-    pub async fn recv(&mut self) -> Option<(Arc<Tx3Id>, BytesList)> {
+    pub async fn recv(
+        &mut self,
+    ) -> Option<(Arc<Tx3Id>, Arc<SocketAddr>, BytesList)> {
         self.inbound_recv.recv().await.map(|msg| msg.extract())
     }
 }
@@ -50,11 +56,19 @@ impl BindHnd {
 /// Tx3 connection pool.
 pub struct Tx3Pool<I: Tx3PoolImp> {
     config: Arc<Tx3PoolConfig>,
+    #[allow(dead_code)]
     tls: tx3::tls::TlsConfig,
     pool_term: Term,
     imp: Arc<I>,
+    bindings: Bindings<I>,
     out_byte_limit: Arc<tokio::sync::Semaphore>,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
+}
+
+impl<I: Tx3PoolImp> Drop for Tx3Pool<I> {
+    fn drop(&mut self) {
+        self.pool_term.term();
+    }
 }
 
 impl<I: Tx3PoolImp> Tx3Pool<I> {
@@ -67,11 +81,17 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
             Some(tls) => tls,
             None => tx3::tls::TlsConfigBuilder::default().build()?,
         };
+        let config = Arc::new(config);
 
-        // non-listening node used for outgoing connections
-        let _out_node =
-            tx3::Tx3Node::new(tx3::Tx3Config::default().with_tls(tls.clone()))
-                .await?;
+        let (cmd_send, cmd_recv) = tokio::sync::mpsc::unbounded_channel();
+
+        let bindings = Bindings::new(
+            config.clone(),
+            imp.clone(),
+            tls.clone(),
+            cmd_send.clone(),
+        )
+        .await?;
 
         let pool_term = Term::new(None);
 
@@ -79,17 +99,17 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
             Arc::new(tokio::sync::Semaphore::new(config.max_out_byte_count));
         let (inbound_send, inbound_recv) =
             tokio::sync::mpsc::unbounded_channel();
-        let (cmd_send, cmd_recv) = tokio::sync::mpsc::unbounded_channel();
         tokio::task::spawn(pool_state_task(
             imp.clone(),
             inbound_send,
             cmd_recv,
         ));
         let this = Self {
-            config: Arc::new(config),
+            config,
             tls,
             pool_term,
             imp,
+            bindings,
             out_byte_limit,
             cmd_send,
         };
@@ -105,21 +125,14 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
     }
 
     /// Get the address at which this pool is externally reachable.
-    pub fn local_addr(&self) -> &Arc<Tx3Addr> {
-        todo!()
+    pub fn local_addr(&self) -> Arc<Tx3Addr> {
+        self.bindings.local_addr()
     }
 
     /// Bind a local listener into this pool, and begin listening
     /// to incoming messages.
     pub async fn bind<A: tx3::IntoAddr>(&self, bind: A) -> Result<BindHnd> {
-        let bind_term = Term::new(None);
-        let _node = tx3::Tx3Node::new(
-            tx3::Tx3Config::default()
-                .with_bind(bind)
-                .with_tls(self.tls.clone()),
-        )
-        .await?;
-        Ok(BindHnd::priv_new(bind_term))
+        self.bindings.bind(bind).await
     }
 
     /// Enqueue an outgoing message for send to a remote peer.

@@ -11,6 +11,7 @@ pub(crate) struct OutboundMsg {
 
 pub(crate) enum PoolStateCmd {
     OutboundMsg(OutboundMsg),
+    InboundAccept(tokio::sync::OwnedSemaphorePermit, tx3::Tx3Connection),
 }
 
 pub(crate) async fn pool_state_task<I: Tx3PoolImp>(

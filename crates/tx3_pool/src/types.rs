@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Result;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic;
 use std::sync::Arc;
@@ -20,15 +21,16 @@ pub(crate) const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
 /// data to be read by the input readers.
 pub(crate) struct InboundMsg {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    peer_id: Arc<Tx3Id>,
-    content: BytesList,
+    pub peer_id: Arc<Tx3Id>,
+    pub peer_addr: Arc<SocketAddr>,
+    pub content: BytesList,
 }
 
 impl InboundMsg {
     /// Extract the contents of this message, dropping the permit,
     /// thereby allowing additional messages to be buffered.
-    pub fn extract(self) -> (Arc<Tx3Id>, BytesList) {
-        (self.peer_id, self.content)
+    pub fn extract(self) -> (Arc<Tx3Id>, Arc<SocketAddr>, BytesList) {
+        (self.peer_id, self.peer_addr, self.content)
     }
 }
 
@@ -84,17 +86,63 @@ impl AddrStore for AddrStoreMem {
 
 /// Tx3Pool hooks trait for calls / events to the implementor.
 pub trait PoolHooks: 'static + Send + Sync {
+    /// Future result type for connect_pre method.
+    type ConnectPreFut: 'static + Send + Future<Output = bool>;
+
+    /// Future result type for accept_addr method.
+    type AcceptAddrFut: 'static + Send + Future<Output = bool>;
+
+    /// Future result type for accept_id method.
+    type AcceptIdFut: 'static + Send + Future<Output = bool>;
+
     /// The pool is now externally reachable at a different address.
-    fn new_addr(&self, addr: Tx3Addr) {
-        let _addr = addr;
-    }
+    fn addr_update(&self, addr: Arc<Tx3Addr>);
+
+    /// We are about to establish a new connection to the given address.
+    /// If this is okay, return `true`, if not return `false`.
+    fn connect_pre(&self, addr: Arc<Tx3Addr>) -> Self::ConnectPreFut;
+
+    /// We are about to accept an incoming connection from the given
+    /// socket address. If this is okay, return `true`, if not return `false`.
+    /// Note, this method will be called before we do the tls handshaking,
+    /// so we don't know the Tx3Id of the remote node.
+    fn accept_addr(&self, addr: SocketAddr) -> Self::AcceptAddrFut;
+
+    /// We are about to accept an incoming connection from the given
+    /// Tx3Id. If this is okay, return `true`, if not return `false`.
+    /// Note, this method will be called *after* tls handshaking,
+    /// so if possible, prefer rejecting connections via `accept_addr()`.
+    fn accept_id(&self, id: Arc<Tx3Id>) -> Self::AcceptIdFut;
 }
 
-/// A default hooks implementation that does nothing.
+/// A default hooks implementation with minimal / no-op implementations.
 #[derive(Default)]
-pub struct PoolHooksNull;
+pub struct PoolHooksDefault;
 
-impl PoolHooks for PoolHooksNull {}
+impl PoolHooks for PoolHooksDefault {
+    type ConnectPreFut = futures::future::Ready<bool>;
+    type AcceptAddrFut = futures::future::Ready<bool>;
+    type AcceptIdFut = futures::future::Ready<bool>;
+
+    fn addr_update(&self, addr: Arc<Tx3Addr>) {
+        let _ = addr;
+    }
+
+    fn connect_pre(&self, addr: Arc<Tx3Addr>) -> Self::ConnectPreFut {
+        let _ = addr;
+        futures::future::ready(true)
+    }
+
+    fn accept_addr(&self, addr: SocketAddr) -> Self::AcceptAddrFut {
+        let _ = addr;
+        futures::future::ready(true)
+    }
+
+    fn accept_id(&self, id: Arc<Tx3Id>) -> Self::AcceptAddrFut {
+        let _ = id;
+        futures::future::ready(true)
+    }
+}
 
 /// Implementation trait for configuring Tx3Pool sub types.
 pub trait Tx3PoolImp: 'static + Send + Sync {
@@ -115,11 +163,11 @@ pub trait Tx3PoolImp: 'static + Send + Sync {
 #[derive(Default)]
 pub struct Tx3PoolImpDefault {
     addr_store: Arc<AddrStoreMem>,
-    pool_hooks: Arc<PoolHooksNull>,
+    pool_hooks: Arc<PoolHooksDefault>,
 }
 
 impl Tx3PoolImp for Tx3PoolImpDefault {
-    type PoolHooks = PoolHooksNull;
+    type PoolHooks = PoolHooksDefault;
     type AddrStore = AddrStoreMem;
 
     fn get_addr_store(&self) -> &Arc<Self::AddrStore> {

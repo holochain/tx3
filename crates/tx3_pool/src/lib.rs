@@ -32,6 +32,12 @@ pub use tx3::Tx3Addr;
 
 pub mod types;
 
+#[doc(inline)]
+pub use types::Tx3PoolConfig;
+
+#[doc(inline)]
+pub use types::Tx3PoolImpDefault;
+
 pub mod pool;
 
 #[doc(inline)]
@@ -39,6 +45,9 @@ pub use pool::Tx3Recv;
 
 #[doc(inline)]
 pub use pool::Tx3Pool;
+
+#[cfg(test)]
+mod smoke_test;
 
 /*
 mod tx3_pool_imp;
