@@ -1,4 +1,62 @@
 //! Tx3 connection pool types.
+//!
+//! Notes on tx3 connection handling. The optimization tradeoff here
+//! is the ability to speak to a large number of remote peers while only
+//! holding open connections to a handful of them at the same time.
+//! Rather than trying to prioritize keeping connections open to avoid
+//! the setup cost, we are choosing to accept this cost, intentionally
+//! rotating our connections closed so we can open new ones to new peers.
+//!
+//! ### Configuration Parameters
+//!
+//! These parameters are currently private so all nodes use the same values
+//! until we implement some kind of negotiation.
+//!
+//! - `con_tgt_time` - a time target correlated to how long we'd
+//!   ideally like connections to remain active once established.
+//!   Default: 4 seconds.
+//!   - unless "want_close" is set, the write side will remain open for at
+//!     least this long, awaiting any late outgoing messages.
+//!   - "want_close" will automatically be set after this time.
+//!   - this time is used as the time window for "rate minimum" checking.
+//! - `rate_min_bytes_per_s` - as opposed to a simple idle
+//!   timeout, we also want to mitigate malicious actors opening connections
+//!   and stalling them with slow byte transmisions. This "rate minimum"
+//!   requires connections to send / receive data at a minimum rate, or
+//!   be considered idle and closed.
+//!   Default: 65_536 (524,288 bps up + down).
+//!
+//! ### The "want_close" Flag
+//!
+//! "want_close" only ever affects the behavior of the write side.
+//! The read side does its own timing checks described below under
+//! "Read Timeout".
+//!
+//! The "want_close" flag is set in two scenarios:
+//! - When `con_tgt_time` has elapsed.
+//! - When the read side of a connection ends, errors, or times out.
+//!
+//! When the write side of a connection has completed sending a full message,
+//! it checks the "want_close" flag. If it is set, it processes a "shutdown",
+//! and is dropped. It does not look for more data to write.
+//!
+//! ### "Rate Minimum" Checking
+//!
+//! After `con_tgt_time` has elapsed, "rate minimum" checking begins. For
+//! the previous sliding `con_tgt_time` window, if the average combined
+//! bytes received and bytes sent per second is ever below
+//! `rate_min_bytes_per_s`, both read and write sides of the connection
+//! are closed immediately without awaiting any completion of current
+//! reads or writes.
+//!
+//! ### Read Timeout
+//!
+//! If TWICE `con_tgt_time` has elapsed on the read side and the current
+//! message completes, the read side will be dropped without attempting
+//! to read any bytes of the next message.
+//!
+//! Waiting twice the time is to mitigate subjective connection start time
+//! differences between the peers.
 
 use crate::types::*;
 use crate::*;
@@ -101,11 +159,16 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
             Arc::new(tokio::sync::Semaphore::new(config.max_out_byte_count));
         let (inbound_send, inbound_recv) =
             tokio::sync::mpsc::unbounded_channel();
+
         tokio::task::spawn(pool_state_task(
+            pool_term.clone(),
+            bindings.clone(),
             imp.clone(),
             inbound_send,
+            cmd_send.clone(),
             cmd_recv,
         ));
+
         let this = Self {
             config,
             tls,

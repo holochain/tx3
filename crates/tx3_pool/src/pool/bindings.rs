@@ -9,8 +9,22 @@ pub(crate) struct Bindings<I: Tx3PoolImp> {
     tls: tx3::tls::TlsConfig,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
     in_con_limit: Arc<tokio::sync::Semaphore>,
-    next_binding_id: atomic::AtomicU64,
+    next_binding_id: Arc<atomic::AtomicU64>,
     inner: Arc<Mutex<BindingsInner>>,
+}
+
+impl<I: Tx3PoolImp> Clone for Bindings<I> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            imp: self.imp.clone(),
+            tls: self.tls.clone(),
+            cmd_send: self.cmd_send.clone(),
+            in_con_limit: self.in_con_limit.clone(),
+            next_binding_id: self.next_binding_id.clone(),
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<I: Tx3PoolImp> Bindings<I> {
@@ -41,9 +55,13 @@ impl<I: Tx3PoolImp> Bindings<I> {
             tls,
             cmd_send,
             in_con_limit,
-            next_binding_id: atomic::AtomicU64::new(1),
+            next_binding_id: Arc::new(atomic::AtomicU64::new(1)),
             inner: Arc::new(Mutex::new(BindingsInner::new(id, addr, out_node))),
         })
+    }
+
+    pub fn get_out_node(&self) -> Result<tx3::Tx3Node> {
+        BindingsInner::access(&self.inner, |inner| inner.get_out_node())
     }
 
     pub fn local_addr(&self) -> Arc<Tx3Addr> {
@@ -137,6 +155,13 @@ impl BindingsInner {
             Some(new_addr)
         } else {
             None
+        }
+    }
+
+    pub fn get_out_node(&self) -> Result<tx3::Tx3Node> {
+        match self.map.get(&0) {
+            Some(node) => Ok(node.clone()),
+            None => Err(other_err("NoOutNodeBound")),
         }
     }
 

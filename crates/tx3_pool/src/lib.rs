@@ -15,6 +15,8 @@
 //! - Connection pool - pool manages connection open/close
 //! - TODO - connection rate limiting on both outgoing and incoming data
 //! - TODO - message multiplexing to mitigate head-of-line blocking
+//!
+//! See the [pool](crate::pool) module for protocol specification.
 
 /// Re-exported dependencies
 pub mod deps {

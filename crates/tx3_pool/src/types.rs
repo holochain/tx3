@@ -57,6 +57,7 @@ impl AddrStoreMem {
     /// Set an item in the memory address store.
     pub fn set<A: tx3::IntoAddr>(&self, addr: A) {
         let addr = addr.into_addr();
+        tracing::trace!(?addr, "AddrStoreMem::set");
         self.access(move |inner| {
             if let Some(id) = &addr.id {
                 inner.insert(id.clone(), addr);
@@ -213,29 +214,20 @@ pub struct Tx3PoolConfig {
 
     /// Connect timeout after which to abandon establishing new connections,
     /// or handshaking incoming connections.
-    /// Default: 20 seconds.
+    /// Default: 8 seconds.
     pub connect_timeout: std::time::Duration,
 
-    /// Idle timeout after which to close the connection.
-    /// Default: 20 seconds.
-    pub idle_timeout: std::time::Duration,
-
-    /// Time an outgoing message is allowed to remain queued but un-sent.
-    /// This timer stops counting as soon as it is claimed by a send worker.
-    /// Default: 20 seconds.
-    pub msg_send_timeout: std::time::Duration,
+    /// NOT PUB -- both sides should match -- someday negotiate? --
+    /// See [pool](crate::pool) module docs.
+    /// Default: 4 seconds.
+    #[allow(dead_code)]
+    con_tgt_time: std::time::Duration,
 
     /// NOT PUB -- both sides should match -- someday negotiate? --
-    /// The max message read/write per connection before closing.
-    /// Default: 64.
+    /// See [pool](crate::pool) module docs.
+    /// Default: 65_536 (524,288 bps up + down).
     #[allow(dead_code)]
-    max_read_write_msg_count_per_con: u64,
-
-    /// NOT PUB -- both sides should match -- someday negotiate? --
-    /// The max byte count that can be read/written per con before closing.
-    /// Default: u32::MAX >> 6.
-    #[allow(dead_code)]
-    max_read_write_byte_count_per_con: u64,
+    rate_min_bytes_per_s: u32,
 }
 
 impl Default for Tx3PoolConfig {
@@ -247,11 +239,9 @@ impl Default for Tx3PoolConfig {
             max_in_con_count: 64,
             max_out_byte_count: FI_LEN_MASK as usize,
             max_in_byte_count: FI_LEN_MASK as usize,
-            connect_timeout: std::time::Duration::from_secs(20),
-            idle_timeout: std::time::Duration::from_secs(20),
-            msg_send_timeout: std::time::Duration::from_secs(20),
-            max_read_write_msg_count_per_con: 64,
-            max_read_write_byte_count_per_con: FI_LEN_MASK as u64,
+            connect_timeout: std::time::Duration::from_secs(8),
+            con_tgt_time: std::time::Duration::from_secs(4),
+            rate_min_bytes_per_s: 65_536,
         }
     }
 }

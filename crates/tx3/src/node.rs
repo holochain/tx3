@@ -53,6 +53,7 @@ impl futures::Stream for Tx3Inbound {
 }
 
 /// A Tx3 p2p communications node
+#[derive(Clone)]
 pub struct Tx3Node {
     config: Arc<Tx3Config>,
     addr: Arc<Tx3Addr>,
