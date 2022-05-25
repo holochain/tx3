@@ -14,6 +14,8 @@ use bindings::*;
 mod pool_state;
 use pool_state::*;
 
+mod con_state;
+
 /// Tx3 pool inbound message receiver.
 pub struct Tx3Recv {
     // safe to be unbounded, because pool logic keeps send permits

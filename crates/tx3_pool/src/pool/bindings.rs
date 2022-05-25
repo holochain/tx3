@@ -261,15 +261,15 @@ async fn process_receiver_accept_inner<I: Tx3PoolImp>(
 
         let con = accept.accept().await?;
 
-        if !imp.get_pool_hooks().accept_id(con.remote_id().clone()).await {
+        if !imp
+            .get_pool_hooks()
+            .accept_id(con.remote_id().clone())
+            .await
+        {
             return Ok(());
         }
 
-        let _ = cmd_send
-            .send(PoolStateCmd::InboundAccept(
-                permit,
-                con,
-            ));
+        let _ = cmd_send.send(PoolStateCmd::InboundAccept(permit, con));
 
         Ok(())
     };
