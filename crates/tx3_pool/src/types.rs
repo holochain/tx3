@@ -20,17 +20,16 @@ pub(crate) const FI_LEN_MASK: u32 = 0b00000011111111111111111111111111;
 /// Drop this to allow that permit to be freed, allowing additional
 /// data to be read by the input readers.
 pub(crate) struct InboundMsg {
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
     pub peer_id: Arc<Tx3Id>,
-    pub peer_addr: Arc<SocketAddr>,
     pub content: BytesList,
 }
 
 impl InboundMsg {
     /// Extract the contents of this message, dropping the permit,
     /// thereby allowing additional messages to be buffered.
-    pub fn extract(self) -> (Arc<Tx3Id>, Arc<SocketAddr>, BytesList) {
-        (self.peer_id, self.peer_addr, self.content)
+    pub fn extract(self) -> (Arc<Tx3Id>, BytesList) {
+        (self.peer_id, self.content)
     }
 }
 
@@ -247,7 +246,7 @@ impl Default for Tx3PoolConfig {
 }
 
 /// A set of distinct chunks of bytes that can be treated as a single unit
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BytesList(pub std::collections::VecDeque<bytes::Bytes>);
 
 impl BytesList {
@@ -263,9 +262,18 @@ impl BytesList {
 
     /// Push a new bytes::Bytes into this BytesList.
     pub fn push(&mut self, data: bytes::Bytes) {
-        if !data.has_remaining() {
+        if data.has_remaining() {
             self.0.push_back(data);
         }
+    }
+
+    /// Copy data into a Vec<u8>. You should avoid this if possible.
+    pub fn to_vec(&self) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::with_capacity(self.remaining());
+        // data is local, it can't error, safe to unwrap
+        self.clone().reader().read_to_end(&mut out).unwrap();
+        out
     }
 
     /// Extract the contents of this BytesList into a new one

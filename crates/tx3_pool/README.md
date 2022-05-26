@@ -15,4 +15,6 @@ This library is a bit of a swiss army blade for p2p connection management.
 - TODO - connection rate limiting on both outgoing and incoming data
 - TODO - message multiplexing to mitigate head-of-line blocking
 
+See the [pool](crate::pool) module for protocol specification.
+
 License: Apache-2.0

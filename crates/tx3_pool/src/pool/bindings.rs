@@ -40,8 +40,10 @@ impl<I: Tx3PoolImp> Bindings<I> {
 
         let id = tls.cert_digest().clone();
 
-        let mut addr = Tx3Addr::default();
-        addr.id = Some(id.clone());
+        let addr = Tx3Addr {
+            id: Some(id.clone()),
+            ..Default::default()
+        };
         let addr = Arc::new(addr);
 
         // non-listening node used for outgoing connections
@@ -139,8 +141,10 @@ impl BindingsInner {
     }
 
     pub fn check_calc_addr(&mut self) -> Option<Arc<Tx3Addr>> {
-        let mut new_addr = Tx3Addr::default();
-        new_addr.id = Some(self.id.clone());
+        let mut new_addr = Tx3Addr {
+            id: Some(self.id.clone()),
+            ..Default::default()
+        };
         let mut stack_set = std::collections::HashSet::new();
         for (_, binding) in self.map.iter() {
             for stack in binding.local_addr().stack_list.iter() {
@@ -294,7 +298,8 @@ async fn process_receiver_accept_inner<I: Tx3PoolImp>(
             return Ok(());
         }
 
-        let _ = cmd_send.send(PoolStateCmd::InboundAccept(permit, con));
+        let _ =
+            cmd_send.send(PoolStateCmd::InboundAccept(Box::new((permit, con))));
 
         Ok(())
     };

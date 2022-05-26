@@ -65,10 +65,20 @@ impl Tx3PoolImp for MyImp {
 async fn smoke_test() {
     init_tracing();
 
-    let (pool1, _recv1) =
+    let (pool1, mut recv1) =
         Tx3Pool::new(Tx3PoolConfig::default(), Arc::new(MyImp::default()))
             .await
             .unwrap();
+
+    let r_task = tokio::task::spawn(async move {
+        use bytes::Buf;
+
+        for _ in 0..4 {
+            let (id, msg) = recv1.recv().await.unwrap();
+            tracing::info!(?id, byte_count = ?msg.remaining());
+            assert_eq!(msg.to_vec().as_slice(), b"hello");
+        }
+    });
 
     pool1.bind("tx3:-/st/127.0.0.1:0/").await.unwrap();
     let addr1 = pool1.local_addr().clone();
@@ -79,6 +89,7 @@ async fn smoke_test() {
             .unwrap();
 
     pool2.as_imp().get_addr_store().set(&addr1);
+
     pool2
         .send(
             addr1.id.as_ref().unwrap().clone(),
@@ -87,6 +98,21 @@ async fn smoke_test() {
         )
         .await
         .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut all = Vec::new();
+    for _ in 0..3 {
+        all.push(pool2.send(
+            addr1.id.as_ref().unwrap().clone(),
+            b"hello",
+            std::time::Duration::from_secs(1),
+        ));
+    }
+
+    futures::future::try_join_all(all).await.unwrap();
+
+    r_task.await.unwrap();
 
     pool1.terminate();
 }

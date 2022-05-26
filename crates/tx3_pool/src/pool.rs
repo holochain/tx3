@@ -84,9 +84,7 @@ pub struct Tx3Recv {
 
 impl Tx3Recv {
     /// Get the next inbound message received by this pool instance.
-    pub async fn recv(
-        &mut self,
-    ) -> Option<(Arc<Tx3Id>, Arc<SocketAddr>, BytesList)> {
+    pub async fn recv(&mut self) -> Option<(Arc<Tx3Id>, BytesList)> {
         self.inbound_recv.recv().await.map(|msg| msg.extract())
     }
 }
@@ -161,6 +159,7 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
             tokio::sync::mpsc::unbounded_channel();
 
         tokio::task::spawn(pool_state_task(
+            config.clone(),
             pool_term.clone(),
             bindings.clone(),
             imp.clone(),

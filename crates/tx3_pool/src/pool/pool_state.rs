@@ -14,10 +14,11 @@ pub(crate) struct OutboundMsg {
 pub(crate) enum PoolStateCmd {
     CleanupCheck,
     OutboundMsg(OutboundMsg),
-    InboundAccept(tokio::sync::OwnedSemaphorePermit, tx3::Tx3Connection),
+    InboundAccept(Box<(tokio::sync::OwnedSemaphorePermit, tx3::Tx3Connection)>),
 }
 
 pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
+    config: Arc<Tx3PoolConfig>,
     pool_term: Term,
     bindings: Bindings<I>,
     imp: Arc<I>,
@@ -51,7 +52,13 @@ pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
     tokio::select! {
         _ = pool_term.on_term() => (),
         _ = async move {
-            if let Err(err) = pool_state_task_inner(bindings, imp, inbound_send, cmd_recv).await {
+            if let Err(err) = pool_state_task_inner(
+                config,
+                bindings,
+                imp,
+                inbound_send,
+                cmd_recv,
+            ).await {
                 tracing::error!(?err);
             }
         } => (),
@@ -59,11 +66,19 @@ pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
 }
 
 async fn pool_state_task_inner<I: Tx3PoolImp>(
+    config: Arc<Tx3PoolConfig>,
     bindings: Bindings<I>,
     imp: Arc<I>,
-    _inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
+    inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     mut cmd_recv: tokio::sync::mpsc::UnboundedReceiver<PoolStateCmd>,
 ) -> Result<()> {
+    let out_con_limit = Arc::new(tokio::sync::Semaphore::new(
+        config.max_out_con_count as usize,
+    ));
+
+    let in_byte_limit =
+        Arc::new(tokio::sync::Semaphore::new(config.max_in_byte_count));
+
     let mut con_state_map: HashMap<Arc<Tx3Id>, ConState<I>> = HashMap::new();
 
     while let Some(cmd) = cmd_recv.recv().await {
@@ -75,14 +90,33 @@ async fn pool_state_task_inner<I: Tx3PoolImp>(
                 let peer_id = msg.peer_id.clone();
                 con_state_map
                     .entry(peer_id.clone())
-                    .or_insert_with(|| ConState::new(bindings.clone(), imp.clone(), peer_id))
+                    .or_insert_with(|| {
+                        ConState::new(
+                            inbound_send.clone(),
+                            out_con_limit.clone(),
+                            in_byte_limit.clone(),
+                            bindings.clone(),
+                            imp.clone(),
+                            peer_id,
+                        )
+                    })
                     .push_outgoing_msg(msg);
             }
-            PoolStateCmd::InboundAccept(con_permit, con) => {
+            PoolStateCmd::InboundAccept(info) => {
+                let (con_permit, con) = *info;
                 let peer_id = con.remote_id().clone();
                 con_state_map
                     .entry(peer_id.clone())
-                    .or_insert_with(|| ConState::new(bindings.clone(), imp.clone(), peer_id))
+                    .or_insert_with(|| {
+                        ConState::new(
+                            inbound_send.clone(),
+                            out_con_limit.clone(),
+                            in_byte_limit.clone(),
+                            bindings.clone(),
+                            imp.clone(),
+                            peer_id,
+                        )
+                    })
                     .maybe_use_con(con_permit, con);
             }
         }
