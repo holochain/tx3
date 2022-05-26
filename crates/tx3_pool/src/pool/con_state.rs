@@ -3,7 +3,10 @@ use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic;
+use std::task::Context;
 use std::task::Poll;
+use std::task::Waker;
 
 #[derive(Clone)]
 pub(crate) struct ConState<I: Tx3PoolImp> {
@@ -43,9 +46,11 @@ impl<I: Tx3PoolImp> ConState<I> {
 
     /// Push a new outgoing message into this state instance.
     pub fn push_outgoing_msg(&self, msg: OutboundMsg) {
-        ConStateInner::access(&self.inner, move |inner| {
+        if let Some(waker) = ConStateInner::access(&self.inner, move |inner| {
             inner.push_outgoing_msg(self.inner.clone(), msg)
-        });
+        }) {
+            waker.wake();
+        }
     }
 
     /// Either accept an incoming connection / start processing messages,
@@ -88,7 +93,8 @@ struct ConStateInner<I: Tx3PoolImp> {
     peer_id: Arc<Tx3Id>,
     msg_list: VecDeque<OutboundMsg>,
     connect_step: ConnectStep,
-    out_notify: Arc<tokio::sync::Notify>,
+    notify_writer: Arc<tokio::sync::Notify>,
+    writer_waker: Option<Waker>,
 }
 
 impl<I: Tx3PoolImp> ConStateInner<I> {
@@ -114,7 +120,8 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
             peer_id,
             msg_list: VecDeque::new(),
             connect_step: ConnectStep::NoConnection,
-            out_notify: Arc::new(tokio::sync::Notify::new()),
+            notify_writer: Arc::new(tokio::sync::Notify::new()),
+            writer_waker: None,
         }
     }
 
@@ -173,22 +180,23 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
         &mut self,
         this: Arc<Mutex<ConStateInner<I>>>,
         msg: OutboundMsg,
-    ) {
+    ) -> Option<Waker> {
         self.msg_list.push_back(msg);
-        self.out_notify.notify_waiters();
+        self.notify_writer.notify_waiters();
         self.check_out_con(this);
+        self.writer_waker.take()
     }
 
     pub fn get_outgoing_msg(
         &mut self,
-    ) -> std::result::Result<OutboundMsg, BoxFuture<'static, ()>> {
-        if let Some(msg) = self.msg_list.pop_front() {
-            Ok(msg)
-        } else {
-            let out_notify = self.out_notify.clone();
-            Err(Box::pin(async move {
-                out_notify.notified().await;
-            }))
+        cx: &mut Context<'_>,
+    ) -> Option<OutboundMsg> {
+        match self.msg_list.pop_front() {
+            Some(msg) => Some(msg),
+            None => {
+                let _waker = cx.waker().clone();
+                None
+            }
         }
     }
 
@@ -202,10 +210,12 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
             ConnectStep::NoConnection | ConnectStep::PendingConnect => {
                 self.connect_step = ConnectStep::Connected;
                 spawn_manage_con(
+                    self.config.clone(),
                     self.pool_term.clone(),
                     self.inbound_send.clone(),
                     self.in_byte_limit.clone(),
                     self.imp.clone(),
+                    self.notify_writer.clone(),
                     this,
                     con_permit,
                     con,
@@ -265,11 +275,14 @@ impl<I: Tx3PoolImp> Drop for ManageConDrop<I> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_manage_con<I: Tx3PoolImp>(
+    config: Arc<Tx3PoolConfig>,
     pool_term: Term,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     _imp: Arc<I>,
+    notify_writer: Arc<tokio::sync::Notify>,
     this: Arc<Mutex<ConStateInner<I>>>,
     con_permit: tokio::sync::OwnedSemaphorePermit,
     con: tx3::Tx3Connection,
@@ -285,23 +298,53 @@ fn spawn_manage_con<I: Tx3PoolImp>(
 
     let (read_half, write_half) = tokio::io::split(con);
 
-    Term::spawn2(
-        &pool_term,
-        &con_term,
-        manage_read_con(
-            inbound_send,
-            in_byte_limit,
-            peer_id,
-            con_drop.clone(),
-            con_term.clone(),
-            read_half,
-        ),
-    );
+    let want_close = Arc::new(atomic::AtomicBool::new(false));
 
-    Term::spawn2(
+    let con_start_time = tokio::time::Instant::now();
+    let con_tgt_time = con_start_time + config.con_tgt_time;
+
+    {
+        let want_close = want_close.clone();
+        let notify_writer = notify_writer.clone();
+        Term::spawn2(&pool_term, &con_term, async move {
+            tokio::time::sleep_until(con_tgt_time).await;
+            want_close.store(true, atomic::Ordering::Release);
+            notify_writer.notify_waiters();
+            Ok(())
+        });
+    }
+
+    {
+        let want_close = want_close.clone();
+        let con_term2 = con_term.clone();
+        Term::spawn_err2(
+            &pool_term,
+            &con_term,
+            manage_read_con(
+                inbound_send,
+                in_byte_limit,
+                peer_id,
+                con_drop.clone(),
+                want_close.clone(),
+                read_half,
+            ),
+            move |err| {
+                want_close.store(true, atomic::Ordering::Release);
+                con_term2.term();
+                tracing::debug!(?err);
+            },
+        );
+    }
+
+    let con_term2 = con_term.clone();
+    Term::spawn_err2(
         &pool_term,
         &con_term,
-        manage_write_con(con_drop, con_term.clone(), this, write_half),
+        manage_write_con(con_drop, notify_writer, this, want_close, write_half),
+        move |err| {
+            con_term2.term();
+            tracing::debug!(?err);
+        },
     );
 }
 
@@ -310,7 +353,7 @@ async fn manage_read_con<I: Tx3PoolImp>(
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     peer_id: Arc<Tx3Id>,
     con_drop: Arc<ManageConDrop<I>>,
-    con_term: Term,
+    want_close: Arc<atomic::AtomicBool>,
     mut con: tokio::io::ReadHalf<tx3::Tx3Connection>,
 ) -> Result<()> {
     // keep this until this task drops
@@ -331,17 +374,17 @@ async fn manage_read_con<I: Tx3PoolImp>(
                 let mut buf = tokio::io::ReadBuf::new(&mut buf);
                 match Pin::new(&mut con).poll_read(cx, &mut buf) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => {
-                        tracing::debug!(?err);
-                        con_term.term();
-                        return Poll::Ready(());
-                    }
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Ready(Ok(_)) => {
                         let filled = buf.filled();
                         if filled.is_empty() {
-                            tracing::debug!("eof");
-                            con_term.term();
-                            return Poll::Ready(());
+                            // the stream is closed
+                            // exit gracefully
+                            // but we *still* need to set want_close
+                            // so that the write side knows to
+                            // start shutting down
+                            want_close.store(true, atomic::Ordering::Release);
+                            return Poll::Ready(Ok(()));
                         }
                         tracing::trace!(byte_count = ?filled.len(), "read bytes");
                         buf_data
@@ -378,11 +421,7 @@ async fn manage_read_con<I: Tx3PoolImp>(
 
                     match byte_permit_fut.as_mut().unwrap().as_mut().poll(cx) {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(err)) => {
-                            tracing::debug!(?err);
-                            con_term.term();
-                            return Poll::Ready(());
-                        }
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                         Poll::Ready(Ok(permit)) => {
                             byte_permit = Some(permit);
                             byte_permit_fut.take();
@@ -398,72 +437,63 @@ async fn manage_read_con<I: Tx3PoolImp>(
                 };
 
                 if inbound_send.send(message).is_err() {
-                    return Poll::Ready(());
+                    return Poll::Ready(Err(other_err("InboundClosed")));
                 }
             }
         }
     })
-    .await;
-
-    Ok(())
+    .await
 }
 
 async fn manage_write_con<I: Tx3PoolImp>(
     con_drop: Arc<ManageConDrop<I>>,
-    con_term: Term,
+    notify_writer: Arc<tokio::sync::Notify>,
     this: Arc<Mutex<ConStateInner<I>>>,
+    want_close: Arc<atomic::AtomicBool>,
     mut con: tokio::io::WriteHalf<tx3::Tx3Connection>,
 ) -> Result<()> {
     // keep this until this task drops
     let _con_drop = con_drop;
 
-    let mut out_notify_fut: Option<BoxFuture<'static, ()>> = None;
+    let mut notify_writer_fut: Option<BoxFuture<'static, ()>> = None;
     let mut cur_msg = None;
     futures::future::poll_fn(move |cx| {
         use tokio::io::AsyncWrite;
 
-        'write_loop: loop {
-            if out_notify_fut.is_some() {
-                match out_notify_fut.as_mut().unwrap().as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
+        loop {
+            // make sure we get a pending on a still outstanding
+            // notify_writer_fut
+            loop {
+                if notify_writer_fut.is_none() {
+                    let notify_writer = notify_writer.clone();
+                    notify_writer_fut = Some(Box::pin(async move {
+                        notify_writer.notified().await;
+                    }));
+                }
+
+                match notify_writer_fut.as_mut().unwrap().as_mut().poll(cx) {
+                    Poll::Pending => break,
                     Poll::Ready(_) => {
-                        out_notify_fut.take();
+                        notify_writer_fut.take();
                     }
                 }
             }
 
             if cur_msg.is_none() {
-                let res = ConStateInner::access(&this, |inner| {
-                    match inner.get_outgoing_msg() {
-                        Ok(msg) => Ok(msg),
-                        Err(mut fut) => {
-                            // we need to poll this fut once before releasing
-                            // the lock
-                            Err(match fut.as_mut().poll(cx) {
-                                Poll::Pending => (fut, Poll::Pending),
-                                Poll::Ready(_) => (fut, Poll::Ready(())),
-                            })
-                        }
-                    }
-                });
+                if want_close.load(atomic::Ordering::Acquire) {
+                    return Poll::Ready(Ok(()));
+                }
 
-                match res {
-                    Ok(mut msg) => {
+                match ConStateInner::access(&this, |inner| {
+                    inner.get_outgoing_msg(cx)
+                }) {
+                    None => return Poll::Pending,
+                    Some(mut msg) => {
                         let len = msg.content.remaining() as u32;
                         let len = len.to_le_bytes();
                         let len = bytes::Bytes::copy_from_slice(&len[..]);
                         msg.content.0.push_front(len);
                         cur_msg = Some(msg);
-                    }
-                    Err((fut, Poll::Pending)) => {
-                        out_notify_fut = Some(fut);
-                        return Poll::Pending;
-                    }
-                    Err((_fut, Poll::Ready(_))) => {
-                        // erm... there was no message, but we got
-                        // an immediate message available notification
-                        // i guess, re-run the loop?
-                        continue 'write_loop;
                     }
                 }
             }
@@ -473,12 +503,11 @@ async fn manage_write_con<I: Tx3PoolImp>(
             {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(err)) => {
-                    tracing::debug!(?err);
+                    let err2 = other_err(format!("{:?}", err));
                     if let Some(msg) = cur_msg.take() {
                         let _ = msg.resolve.send(Err(err));
                     }
-                    con_term.term();
-                    return Poll::Ready(());
+                    return Poll::Ready(Err(err2));
                 }
                 Poll::Ready(Ok(byte_count)) => {
                     tracing::trace!(?byte_count, "wrote bytes");
@@ -489,12 +518,14 @@ async fn manage_write_con<I: Tx3PoolImp>(
                         if let Some(msg) = cur_msg.take() {
                             let _ = msg.resolve.send(Ok(()));
                         }
+
+                        if want_close.load(atomic::Ordering::Acquire) {
+                            return Poll::Ready(Ok(()));
+                        }
                     }
                 }
             }
         }
     })
-    .await;
-
-    Ok(())
+    .await
 }

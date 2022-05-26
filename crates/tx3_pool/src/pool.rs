@@ -34,7 +34,7 @@
 //!
 //! The "want_close" flag is set in two scenarios:
 //! - When `con_tgt_time` has elapsed.
-//! - When the read side of a connection ends, errors, or times out.
+//! - When the read side of a connection ends.
 //!
 //! When the write side of a connection has completed sending a full message,
 //! it checks the "want_close" flag. If it is set, it processes a "shutdown",

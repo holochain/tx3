@@ -216,14 +216,13 @@ pub struct Tx3PoolConfig {
     /// NOT PUB -- both sides should match -- someday negotiate? --
     /// See [pool](crate::pool) module docs.
     /// Default: 4 seconds.
-    #[allow(dead_code)]
-    con_tgt_time: std::time::Duration,
+    pub(crate) con_tgt_time: std::time::Duration,
 
     /// NOT PUB -- both sides should match -- someday negotiate? --
     /// See [pool](crate::pool) module docs.
     /// Default: 65_536 (524,288 bps up + down).
     #[allow(dead_code)]
-    rate_min_bytes_per_s: u32,
+    pub(crate) rate_min_bytes_per_s: u32,
 }
 
 impl Default for Tx3PoolConfig {
