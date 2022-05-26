@@ -5,6 +5,7 @@ use std::sync::atomic;
 
 pub(crate) struct Bindings<I: Tx3PoolImp> {
     config: Arc<Tx3PoolConfig>,
+    pool_term: Term,
     imp: Arc<I>,
     tls: tx3::tls::TlsConfig,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
@@ -17,6 +18,7 @@ impl<I: Tx3PoolImp> Clone for Bindings<I> {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            pool_term: self.pool_term.clone(),
             imp: self.imp.clone(),
             tls: self.tls.clone(),
             cmd_send: self.cmd_send.clone(),
@@ -30,6 +32,7 @@ impl<I: Tx3PoolImp> Clone for Bindings<I> {
 impl<I: Tx3PoolImp> Bindings<I> {
     pub async fn new(
         config: Arc<Tx3PoolConfig>,
+        pool_term: Term,
         imp: Arc<I>,
         tls: tx3::tls::TlsConfig,
         cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
@@ -53,6 +56,7 @@ impl<I: Tx3PoolImp> Bindings<I> {
 
         Ok(Self {
             config,
+            pool_term,
             imp,
             tls,
             cmd_send,
@@ -91,23 +95,38 @@ impl<I: Tx3PoolImp> Bindings<I> {
 
         let inner = self.inner.clone();
         let imp = self.imp.clone();
-        let bind_term = Term::new(Some(Arc::new(move || {
-            let new_addr = BindingsInner::access(&inner, |inner| {
-                inner.terminate(binding_id)
-            });
-            if let Some(new_addr) = new_addr {
-                imp.get_pool_hooks().addr_update(new_addr);
-            }
-        })));
+        let bind_term = Term::new(
+            "BindingClosed",
+            Some(Arc::new(move || {
+                let new_addr = BindingsInner::access(&inner, |inner| {
+                    inner.terminate(binding_id)
+                });
+                if let Some(new_addr) = new_addr {
+                    imp.get_pool_hooks().addr_update(new_addr);
+                }
+            })),
+        );
 
-        tokio::task::spawn(process_receiver(
-            self.config.clone(),
-            bind_term.clone(),
-            self.imp.clone(),
-            self.cmd_send.clone(),
-            self.in_con_limit.clone(),
-            recv,
-        ));
+        {
+            let bind_term_err = bind_term.clone();
+            Term::spawn_err2(
+                &self.pool_term,
+                &bind_term,
+                process_receiver(
+                    self.config.clone(),
+                    self.pool_term.clone(),
+                    bind_term.clone(),
+                    self.imp.clone(),
+                    self.cmd_send.clone(),
+                    self.in_con_limit.clone(),
+                    recv,
+                ),
+                move |err| {
+                    tracing::debug!(?err);
+                    bind_term_err.term();
+                },
+            );
+        }
 
         Ok(BindHnd::priv_new(bind_term))
     }
@@ -192,98 +211,56 @@ impl BindingsInner {
 
 async fn process_receiver<I: Tx3PoolImp>(
     config: Arc<Tx3PoolConfig>,
-    bind_term: Term,
-    imp: Arc<I>,
-    cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
-    in_con_limit: Arc<tokio::sync::Semaphore>,
-    recv: tx3::Tx3Inbound,
-) {
-    if let Err(err) = process_receiver_inner(
-        config,
-        bind_term.clone(),
-        imp,
-        cmd_send,
-        in_con_limit,
-        recv,
-    )
-    .await
-    {
-        tracing::debug!(?err);
-    }
-    bind_term.term();
-}
-
-async fn process_receiver_inner<I: Tx3PoolImp>(
-    config: Arc<Tx3PoolConfig>,
+    pool_term: Term,
     bind_term: Term,
     imp: Arc<I>,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
     in_con_limit: Arc<tokio::sync::Semaphore>,
     mut recv: tx3::Tx3Inbound,
 ) -> Result<()> {
-    tokio::select! {
-        _ = bind_term.on_term() => (),
-        _ = async move {
-            loop {
-                let (accept, addr) = match recv.recv().await {
-                    None => break,
-                    Some(r) => r,
-                };
+    loop {
+        let (accept, addr) = match recv.recv().await {
+            None => break,
+            Some(r) => r,
+        };
 
-                let permit = match in_con_limit.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        // no available permits, drop the connection
-                        // this is preferable to backpressure because
-                        // in DDoS mitigation mode, we don't want a bunch
-                        // of waiting connections hanging around
-                        continue;
-                    }
-                };
-
-                tokio::task::spawn(process_receiver_accept(
-                    config.clone(),
-                    bind_term.clone(),
-                    imp.clone(),
-                    permit,
-                    accept,
-                    addr,
-                    cmd_send.clone(),
-                ));
+        let permit = match in_con_limit.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // no available permits, drop the connection
+                // this is preferable to backpressure because
+                // in DDoS mitigation mode, we don't want a bunch
+                // of waiting connections hanging around
+                continue;
             }
-        } => (),
+        };
+
+        Term::spawn2(
+            &pool_term,
+            &bind_term,
+            process_receiver_accept(
+                config.clone(),
+                imp.clone(),
+                permit,
+                accept,
+                addr,
+                cmd_send.clone(),
+            ),
+        );
     }
+
     Ok(())
 }
 
 async fn process_receiver_accept<I: Tx3PoolImp>(
     config: Arc<Tx3PoolConfig>,
-    bind_term: Term,
-    imp: Arc<I>,
-    permit: tokio::sync::OwnedSemaphorePermit,
-    accept: tx3::Tx3InboundAccept,
-    addr: SocketAddr,
-    cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
-) {
-    if let Err(err) = process_receiver_accept_inner(
-        config, bind_term, imp, permit, accept, addr, cmd_send,
-    )
-    .await
-    {
-        tracing::debug!(?err);
-    }
-}
-
-async fn process_receiver_accept_inner<I: Tx3PoolImp>(
-    config: Arc<Tx3PoolConfig>,
-    bind_term: Term,
     imp: Arc<I>,
     permit: tokio::sync::OwnedSemaphorePermit,
     accept: tx3::Tx3InboundAccept,
     addr: SocketAddr,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
 ) -> Result<()> {
-    let fut = async move {
+    tokio::time::timeout(config.connect_timeout, async move {
         if !imp.get_pool_hooks().accept_addr(addr).await {
             return Ok(());
         }
@@ -302,13 +279,6 @@ async fn process_receiver_accept_inner<I: Tx3PoolImp>(
             cmd_send.send(PoolStateCmd::InboundAccept(Box::new((permit, con))));
 
         Ok(())
-    };
-
-    tokio::time::timeout(config.connect_timeout, async move {
-        tokio::select! {
-            _ = bind_term.on_term() => Ok(()),
-            r = fut => r,
-        }
     })
     .await
     .map_err(other_err)?

@@ -23,6 +23,8 @@ pub mod deps {
     pub use tx3;
 }
 
+use tx3::util::Term;
+
 #[doc(inline)]
 pub use tx3::other_err;
 

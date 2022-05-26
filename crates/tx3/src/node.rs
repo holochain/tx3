@@ -71,7 +71,7 @@ impl Tx3Node {
     pub async fn new(mut config: Tx3Config) -> Result<(Self, Tx3Inbound)> {
         use futures::future::FutureExt;
 
-        let shutdown = Term::new(None);
+        let shutdown = Term::new("NodeShutdown", None);
 
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
@@ -263,46 +263,43 @@ async fn bind_tx3_st(
     for a in upgrade_addr(addr)? {
         out.push(Arc::new(Tx3Stack::TlsTcp(a.to_string())));
     }
-    tokio::task::spawn(async move {
-        tokio::select! {
-            _ = shutdown.on_term() => (),
-            _ = async move {
-                loop {
-                    let res = listener.accept().await;
-                    let mut rem_addr = SocketAddr::V4(
-                        std::net::SocketAddrV4::new(
-                            std::net::Ipv4Addr::new(0, 0, 0, 0),
-                            0,
-                        )
-                    );
 
-                    let ib_fut = match res {
+    shutdown.spawn(async move {
+        loop {
+            let res = listener.accept().await;
+            let mut rem_addr = SocketAddr::V4(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::new(0, 0, 0, 0),
+                0,
+            ));
+
+            let ib_fut = match res {
+                Err(e) => Tx3InboundAcceptInner::Err(e),
+                Ok((socket, addr)) => {
+                    rem_addr = addr;
+                    match crate::tcp::tx3_tcp_configure(socket) {
                         Err(e) => Tx3InboundAcceptInner::Err(e),
-                        Ok((socket, addr)) => {
-                            rem_addr = addr;
-                            match crate::tcp::tx3_tcp_configure(socket) {
-                                Err(e) => Tx3InboundAcceptInner::Err(e),
-                                Ok(socket) => {
-                                    Tx3InboundAcceptInner::Tx3st(Tx3InboundAcceptSt {
-                                        tls: config.priv_tls().clone(),
-                                        socket,
-                                    })
-                                }
-                            }
+                        Ok(socket) => {
+                            Tx3InboundAcceptInner::Tx3st(Tx3InboundAcceptSt {
+                                tls: config.priv_tls().clone(),
+                                socket,
+                            })
                         }
-                    };
-
-                    if con_send
-                        .send((Tx3InboundAccept { inner: ib_fut }, rem_addr))
-                        .await
-                        .is_err()
-                    {
-                        break;
                     }
                 }
-            } => (),
+            };
+
+            if con_send
+                .send((Tx3InboundAccept { inner: ib_fut }, rem_addr))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
+
+        Ok(())
     });
+
     Ok(out)
 }
 
@@ -362,64 +359,56 @@ async fn bind_tx3_rst_inner(
     let mut all_clear = [0];
     control_socket.read_exact(&mut all_clear).await?;
 
-    tokio::task::spawn(async move {
+    shutdown.spawn(async move {
         let mut buf = [0_u8; 16 + 2 + 32];
-        tokio::select! {
-            _ = shutdown.on_term() => Result::Ok(()),
-            r = async move {
-                loop {
-                    control_socket.read_exact(&mut buf).await?;
 
-                    let port = u16::from_be_bytes([buf[16], buf[17]]);
+        loop {
+            control_socket.read_exact(&mut buf).await?;
 
-                    let rem_addr = match &buf[..16] {
-                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
-                            std::net::SocketAddr::V4(
-                                std::net::SocketAddrV4::new(
-                                    std::net::Ipv4Addr::new(*a, *b, *c, *d),
-                                    port,
-                                )
-                            )
-                        }
-                        [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => {
-                            std::net::SocketAddr::V6(
-                                std::net::SocketAddrV6::new(
-                                    std::net::Ipv6Addr::from([*a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o, *p]),
-                                    port,
-                                    0,
-                                    0,
-                                )
-                            )
-                        }
-                        _ => unreachable!(),
-                    };
+            let port = u16::from_be_bytes([buf[16], buf[17]]);
 
-                    tracing::trace!(?rem_addr, "accept incoming");
-
-                    let mut splice_token = [0; 32];
-                    splice_token.copy_from_slice(&buf[18..]);
-
-                    let ib_fut = Tx3InboundAcceptInner::Tx3rst(Tx3InboundAcceptRst {
-                        tls: config.priv_tls().clone(),
-                        addr,
-                        splice_token: Arc::new(splice_token),
-                    });
-
-                    if con_send
-                        .send((
-                            Tx3InboundAccept { inner: ib_fut },
-                            rem_addr,
-                        ))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+            let rem_addr = match &buf[..16] {
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                        std::net::Ipv4Addr::new(*a, *b, *c, *d),
+                        port,
+                    ))
                 }
+                [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => {
+                    std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                        std::net::Ipv6Addr::from([
+                            *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m,
+                            *n, *o, *p,
+                        ]),
+                        port,
+                        0,
+                        0,
+                    ))
+                }
+                _ => unreachable!(),
+            };
 
-                Result::Ok(())
-            } => r,
+            tracing::trace!(?rem_addr, "accept incoming");
+
+            let mut splice_token = [0; 32];
+            splice_token.copy_from_slice(&buf[18..]);
+
+            let ib_fut = Tx3InboundAcceptInner::Tx3rst(Tx3InboundAcceptRst {
+                tls: config.priv_tls().clone(),
+                addr,
+                splice_token: Arc::new(splice_token),
+            });
+
+            if con_send
+                .send((Tx3InboundAccept { inner: ib_fut }, rem_addr))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
+
+        Result::Ok(())
     });
 
     Ok(())

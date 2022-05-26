@@ -24,54 +24,23 @@ pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
     imp: Arc<I>,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
-    cmd_recv: tokio::sync::mpsc::UnboundedReceiver<PoolStateCmd>,
-) {
-    let on_term = pool_term.on_term();
-    tokio::task::spawn(async move {
-        tokio::select! {
-            _ = on_term => (),
-            _ = async move {
-                let dur = std::time::Duration::from_secs(5);
-                let mut interval = tokio::time::interval_at(
-                    tokio::time::Instant::now() + dur,
-                    dur,
-                );
-                interval.set_missed_tick_behavior(
-                    tokio::time::MissedTickBehavior::Delay,
-                );
-                loop {
-                    interval.tick().await;
-                    if cmd_send.send(PoolStateCmd::CleanupCheck).is_err() {
-                        break;
-                    }
-                }
-            } => (),
-        }
-    });
-
-    tokio::select! {
-        _ = pool_term.on_term() => (),
-        _ = async move {
-            if let Err(err) = pool_state_task_inner(
-                config,
-                bindings,
-                imp,
-                inbound_send,
-                cmd_recv,
-            ).await {
-                tracing::error!(?err);
-            }
-        } => (),
-    }
-}
-
-async fn pool_state_task_inner<I: Tx3PoolImp>(
-    config: Arc<Tx3PoolConfig>,
-    bindings: Bindings<I>,
-    imp: Arc<I>,
-    inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     mut cmd_recv: tokio::sync::mpsc::UnboundedReceiver<PoolStateCmd>,
 ) -> Result<()> {
+    pool_term.spawn(async move {
+        let dur = std::time::Duration::from_secs(5);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if cmd_send.send(PoolStateCmd::CleanupCheck).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+
     let out_con_limit = Arc::new(tokio::sync::Semaphore::new(
         config.max_out_con_count as usize,
     ));
@@ -92,6 +61,8 @@ async fn pool_state_task_inner<I: Tx3PoolImp>(
                     .entry(peer_id.clone())
                     .or_insert_with(|| {
                         ConState::new(
+                            config.clone(),
+                            pool_term.clone(),
                             inbound_send.clone(),
                             out_con_limit.clone(),
                             in_byte_limit.clone(),
@@ -109,6 +80,8 @@ async fn pool_state_task_inner<I: Tx3PoolImp>(
                     .entry(peer_id.clone())
                     .or_insert_with(|| {
                         ConState::new(
+                            config.clone(),
+                            pool_term.clone(),
                             inbound_send.clone(),
                             out_con_limit.clone(),
                             in_byte_limit.clone(),

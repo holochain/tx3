@@ -143,22 +143,23 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
 
         let (cmd_send, cmd_recv) = tokio::sync::mpsc::unbounded_channel();
 
+        let pool_term = Term::new("PoolClosed", None);
+
         let bindings = Bindings::new(
             config.clone(),
+            pool_term.clone(),
             imp.clone(),
             tls.clone(),
             cmd_send.clone(),
         )
         .await?;
 
-        let pool_term = Term::new(None);
-
         let out_byte_limit =
             Arc::new(tokio::sync::Semaphore::new(config.max_out_byte_count));
         let (inbound_send, inbound_recv) =
             tokio::sync::mpsc::unbounded_channel();
 
-        tokio::task::spawn(pool_state_task(
+        pool_term.spawn(pool_state_task(
             config.clone(),
             pool_term.clone(),
             bindings.clone(),

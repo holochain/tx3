@@ -11,7 +11,10 @@ pub(crate) struct ConState<I: Tx3PoolImp> {
 }
 
 impl<I: Tx3PoolImp> ConState<I> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        config: Arc<Tx3PoolConfig>,
+        pool_term: Term,
         inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
         out_con_limit: Arc<tokio::sync::Semaphore>,
         in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -21,6 +24,8 @@ impl<I: Tx3PoolImp> ConState<I> {
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ConStateInner::new(
+                config,
+                pool_term,
                 inbound_send,
                 out_con_limit,
                 in_byte_limit,
@@ -33,7 +38,7 @@ impl<I: Tx3PoolImp> ConState<I> {
 
     /// If this returns `false` it can be safely dropped.
     pub fn is_active(&self) -> bool {
-        ConStateInner::access(&self.inner, |inner| inner.is_active())
+        ConStateInner::access(&self.inner, |inner| inner.check_active())
     }
 
     /// Push a new outgoing message into this state instance.
@@ -73,6 +78,8 @@ impl ConnectStep {
 }
 
 struct ConStateInner<I: Tx3PoolImp> {
+    config: Arc<Tx3PoolConfig>,
+    pool_term: Term,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     out_con_limit: Arc<tokio::sync::Semaphore>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -85,7 +92,10 @@ struct ConStateInner<I: Tx3PoolImp> {
 }
 
 impl<I: Tx3PoolImp> ConStateInner<I> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        config: Arc<Tx3PoolConfig>,
+        pool_term: Term,
         inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
         out_con_limit: Arc<tokio::sync::Semaphore>,
         in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -94,6 +104,8 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
         peer_id: Arc<Tx3Id>,
     ) -> Self {
         Self {
+            config,
+            pool_term,
             inbound_send,
             out_con_limit,
             in_byte_limit,
@@ -132,18 +144,27 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
     fn check_out_con(&mut self, this: Arc<Mutex<ConStateInner<I>>>) {
         if !self.connect_step.is_active() {
             self.connect_step = ConnectStep::PendingConnect;
-            tokio::task::spawn(open_out_con(
-                self.out_con_limit.clone(),
-                self.bindings.clone(),
-                self.imp.clone(),
-                this,
-                self.peer_id.clone(),
-            ));
+            let this2 = this.clone();
+            self.pool_term.spawn_err(
+                open_out_con(
+                    self.config.clone(),
+                    self.out_con_limit.clone(),
+                    self.bindings.clone(),
+                    self.imp.clone(),
+                    this,
+                    self.peer_id.clone(),
+                ),
+                move |err| {
+                    tracing::debug!(?err);
+                    ConStateInner::access(&this2, |inner| {
+                        inner.connect_step = ConnectStep::NoConnection;
+                    });
+                },
+            );
         }
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub fn is_active(&mut self) -> bool {
+    pub fn check_active(&mut self) -> bool {
         self.clear_timeouts();
         !self.msg_list.is_empty() || self.connect_step.is_active()
     }
@@ -180,14 +201,15 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
         match self.connect_step {
             ConnectStep::NoConnection | ConnectStep::PendingConnect => {
                 self.connect_step = ConnectStep::Connected;
-                tokio::task::spawn(manage_con(
+                spawn_manage_con(
+                    self.pool_term.clone(),
                     self.inbound_send.clone(),
                     self.in_byte_limit.clone(),
                     self.imp.clone(),
                     this,
                     con_permit,
                     con,
-                ));
+                );
             }
             ConnectStep::Connected => {
                 tracing::debug!("dropping con due to already connected");
@@ -197,49 +219,37 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
 }
 
 async fn open_out_con<I: Tx3PoolImp>(
-    out_con_limit: Arc<tokio::sync::Semaphore>,
-    bindings: Bindings<I>,
-    imp: Arc<I>,
-    this: Arc<Mutex<ConStateInner<I>>>,
-    peer_id: Arc<Tx3Id>,
-) {
-    if let Err(err) =
-        open_out_con_inner(out_con_limit, bindings, imp, this.clone(), peer_id)
-            .await
-    {
-        tracing::debug!(?err);
-        ConStateInner::access(&this, |inner| {
-            inner.connect_step = ConnectStep::NoConnection;
-        });
-    }
-}
-
-async fn open_out_con_inner<I: Tx3PoolImp>(
+    config: Arc<Tx3PoolConfig>,
     out_con_limit: Arc<tokio::sync::Semaphore>,
     bindings: Bindings<I>,
     imp: Arc<I>,
     this: Arc<Mutex<ConStateInner<I>>>,
     peer_id: Arc<Tx3Id>,
 ) -> Result<()> {
-    let con_permit = out_con_limit.acquire_owned().await.map_err(other_err)?;
+    tokio::time::timeout(config.connect_timeout, async move {
+        let con_permit =
+            out_con_limit.acquire_owned().await.map_err(other_err)?;
 
-    let addr = imp.get_addr_store().lookup_addr(&peer_id).await?;
-    tracing::trace!(?addr, "addr for new out con");
+        let addr = imp.get_addr_store().lookup_addr(&peer_id).await?;
+        tracing::trace!(?addr, "addr for new out con");
 
-    if !imp.get_pool_hooks().connect_pre(addr.clone()).await {
-        return Err(other_err("connect_pre returned false"));
-    }
+        if !imp.get_pool_hooks().connect_pre(addr.clone()).await {
+            return Err(other_err("connect_pre returned false"));
+        }
 
-    let node = bindings.get_out_node()?;
+        let node = bindings.get_out_node()?;
 
-    let con = node.connect(addr).await?;
+        let con = node.connect(addr).await?;
 
-    let this2 = this.clone();
-    ConStateInner::access(&this, move |inner| {
-        inner.maybe_use_con(this2, con_permit, con)
-    });
+        let this2 = this.clone();
+        ConStateInner::access(&this, move |inner| {
+            inner.maybe_use_con(this2, con_permit, con)
+        });
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(other_err)?
 }
 
 struct ManageConDrop<I: Tx3PoolImp> {
@@ -255,7 +265,8 @@ impl<I: Tx3PoolImp> Drop for ManageConDrop<I> {
     }
 }
 
-async fn manage_con<I: Tx3PoolImp>(
+fn spawn_manage_con<I: Tx3PoolImp>(
+    pool_term: Term,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     _imp: Arc<I>,
@@ -265,23 +276,45 @@ async fn manage_con<I: Tx3PoolImp>(
 ) {
     let peer_id = con.remote_id().clone();
 
-    let con_term = Term::new(None);
+    let con_term = Term::new("ConClosed", None);
 
     let con_drop = Arc::new(ManageConDrop {
         _permit: con_permit,
         this: this.clone(),
     });
 
-    let (mut con, write_half) = tokio::io::split(con);
+    let (read_half, write_half) = tokio::io::split(con);
 
-    tokio::task::spawn(manage_write_con(
-        con_drop.clone(),
-        con_term.clone(),
-        this.clone(),
-        write_half,
-    ));
+    Term::spawn2(
+        &pool_term,
+        &con_term,
+        manage_read_con(
+            inbound_send,
+            in_byte_limit,
+            peer_id,
+            con_drop.clone(),
+            con_term.clone(),
+            read_half,
+        ),
+    );
 
-    // -- this task is now the "read side" -- //
+    Term::spawn2(
+        &pool_term,
+        &con_term,
+        manage_write_con(con_drop, con_term.clone(), this, write_half),
+    );
+}
+
+async fn manage_read_con<I: Tx3PoolImp>(
+    inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
+    in_byte_limit: Arc<tokio::sync::Semaphore>,
+    peer_id: Arc<Tx3Id>,
+    con_drop: Arc<ManageConDrop<I>>,
+    con_term: Term,
+    mut con: tokio::io::ReadHalf<tx3::Tx3Connection>,
+) -> Result<()> {
+    // keep this until this task drops
+    let _con_drop = con_drop;
 
     let mut buf = [0; 4096];
     let mut buf_data = BytesList::new();
@@ -371,6 +404,8 @@ async fn manage_con<I: Tx3PoolImp>(
         }
     })
     .await;
+
+    Ok(())
 }
 
 async fn manage_write_con<I: Tx3PoolImp>(
@@ -378,7 +413,7 @@ async fn manage_write_con<I: Tx3PoolImp>(
     con_term: Term,
     this: Arc<Mutex<ConStateInner<I>>>,
     mut con: tokio::io::WriteHalf<tx3::Tx3Connection>,
-) {
+) -> Result<()> {
     // keep this until this task drops
     let _con_drop = con_drop;
 
@@ -460,4 +495,6 @@ async fn manage_write_con<I: Tx3PoolImp>(
         }
     })
     .await;
+
+    Ok(())
 }
