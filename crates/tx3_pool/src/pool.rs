@@ -66,6 +66,9 @@ use std::io::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+mod bandwidth;
+use bandwidth::*;
+
 mod bindings;
 use bindings::*;
 

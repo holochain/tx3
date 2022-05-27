@@ -93,6 +93,7 @@ struct ConStateInner<I: Tx3PoolImp> {
     peer_id: Arc<Tx3Id>,
     msg_list: VecDeque<OutboundMsg>,
     connect_step: ConnectStep,
+    notify_reader: Arc<tokio::sync::Notify>,
     notify_writer: Arc<tokio::sync::Notify>,
     writer_waker: Option<Waker>,
 }
@@ -120,6 +121,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
             peer_id,
             msg_list: VecDeque::new(),
             connect_step: ConnectStep::NoConnection,
+            notify_reader: Arc::new(tokio::sync::Notify::new()),
             notify_writer: Arc::new(tokio::sync::Notify::new()),
             writer_waker: None,
         }
@@ -215,6 +217,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
                     self.inbound_send.clone(),
                     self.in_byte_limit.clone(),
                     self.imp.clone(),
+                    self.notify_reader.clone(),
                     self.notify_writer.clone(),
                     this,
                     con_permit,
@@ -282,6 +285,7 @@ fn spawn_manage_con<I: Tx3PoolImp>(
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     _imp: Arc<I>,
+    notify_reader: Arc<tokio::sync::Notify>,
     notify_writer: Arc<tokio::sync::Notify>,
     this: Arc<Mutex<ConStateInner<I>>>,
     con_permit: tokio::sync::OwnedSemaphorePermit,
@@ -291,6 +295,8 @@ fn spawn_manage_con<I: Tx3PoolImp>(
 
     let con_term = Term::new("ConClosed", None);
 
+    // setup the drop handler to clear the con_state and drop our con_permit
+    // when both the reader and writer tasks have closed.
     let con_drop = Arc::new(ManageConDrop {
         _permit: con_permit,
         this: this.clone(),
@@ -298,49 +304,102 @@ fn spawn_manage_con<I: Tx3PoolImp>(
 
     let (read_half, write_half) = tokio::io::split(con);
 
-    let want_close = Arc::new(atomic::AtomicBool::new(false));
+    let want_read_close = Arc::new(atomic::AtomicBool::new(false));
+    let want_write_close = Arc::new(atomic::AtomicBool::new(false));
 
     let con_start_time = tokio::time::Instant::now();
-    let con_tgt_time = con_start_time + config.con_tgt_time;
 
+    // only supports whole seconds
+    let bandwidth_bucket_span = config.con_tgt_time.as_secs() as usize;
+    let bandwidth = Bandwidth::new(con_start_time, bandwidth_bucket_span);
+
+    // set up the "want_read_close" timer at TWICE con_tgt_time
+    let con_read_tgt_time = con_start_time + (config.con_tgt_time * 2);
     {
-        let want_close = want_close.clone();
-        let notify_writer = notify_writer.clone();
+        let want_read_close = want_read_close.clone();
+        let notify_reader = notify_reader.clone();
         Term::spawn2(&pool_term, &con_term, async move {
-            tokio::time::sleep_until(con_tgt_time).await;
-            want_close.store(true, atomic::Ordering::Release);
-            notify_writer.notify_waiters();
+            tokio::time::sleep_until(con_read_tgt_time).await;
+            want_read_close.store(true, atomic::Ordering::Release);
+            notify_reader.notify_waiters();
             Ok(())
         });
     }
 
+    // set up the "want_write_close" timer at con_tgt_time
+    // this also becomes the "Rate Minimum" checker task
+    let con_write_tgt_time = con_start_time + config.con_tgt_time;
     {
-        let want_close = want_close.clone();
+        let bandwidth = bandwidth.clone();
+        let want_write_close = want_write_close.clone();
+        let notify_writer = notify_writer.clone();
+        let con_term2 = con_term.clone();
+        Term::spawn2(&pool_term, &con_term, async move {
+            tokio::time::sleep_until(con_write_tgt_time).await;
+            want_write_close.store(true, atomic::Ordering::Release);
+            notify_writer.notify_waiters();
+
+            // co-opt this task into checking "Rate Minimum" now that
+            // con_tgt_time has elapsed.
+
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay,
+            );
+            interval.tick().await; // consume the initial no-time tick
+
+            loop {
+                interval.tick().await;
+
+                if let Some(bw) = bandwidth.get() {
+                    if bw < config.rate_min_bytes_per_s as usize {
+                        con_term2.term();
+                    }
+                }
+            }
+        });
+    }
+
+    // spawn the reader task
+    {
+        let want_write_close = want_write_close.clone();
         let con_term2 = con_term.clone();
         Term::spawn_err2(
             &pool_term,
             &con_term,
             manage_read_con(
+                bandwidth.clone(),
                 inbound_send,
                 in_byte_limit,
                 peer_id,
                 con_drop.clone(),
-                want_close.clone(),
+                notify_reader,
+                want_read_close,
+                want_write_close.clone(),
                 read_half,
             ),
             move |err| {
-                want_close.store(true, atomic::Ordering::Release);
+                want_write_close.store(true, atomic::Ordering::Release);
                 con_term2.term();
                 tracing::debug!(?err);
             },
         );
     }
 
+    // spawn the writer task
     let con_term2 = con_term.clone();
     Term::spawn_err2(
         &pool_term,
         &con_term,
-        manage_write_con(con_drop, notify_writer, this, want_close, write_half),
+        manage_write_con(
+            bandwidth,
+            con_drop,
+            notify_writer,
+            this,
+            want_write_close,
+            write_half,
+        ),
         move |err| {
             con_term2.term();
             tracing::debug!(?err);
@@ -348,12 +407,16 @@ fn spawn_manage_con<I: Tx3PoolImp>(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn manage_read_con<I: Tx3PoolImp>(
+    bandwidth: Bandwidth,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     peer_id: Arc<Tx3Id>,
     con_drop: Arc<ManageConDrop<I>>,
-    want_close: Arc<atomic::AtomicBool>,
+    notify_reader: Arc<tokio::sync::Notify>,
+    want_read_close: Arc<atomic::AtomicBool>,
+    want_write_close: Arc<atomic::AtomicBool>,
     mut con: tokio::io::ReadHalf<tx3::Tx3Connection>,
 ) -> Result<()> {
     // keep this until this task drops
@@ -362,6 +425,7 @@ async fn manage_read_con<I: Tx3PoolImp>(
     let mut buf = [0; 4096];
     let mut buf_data = BytesList::new();
     let mut next_size = None;
+    let mut notify_reader_fut: Option<BoxFuture<'static, ()>> = None;
     let mut byte_permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
     let mut byte_permit_fut: Option<
         BoxFuture<'static, Result<tokio::sync::OwnedSemaphorePermit>>,
@@ -370,7 +434,30 @@ async fn manage_read_con<I: Tx3PoolImp>(
         use tokio::io::AsyncRead;
 
         'read_loop: loop {
-            {
+            // make sure we get a pending on a still outstanding
+            // notify_reader_fut
+            loop {
+                if notify_reader_fut.is_none() {
+                    let notify_reader = notify_reader.clone();
+                    notify_reader_fut = Some(Box::pin(async move {
+                        notify_reader.notified().await;
+                    }));
+                }
+
+                match notify_reader_fut.as_mut().unwrap().as_mut().poll(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(_) => {
+                        notify_reader_fut.take();
+                    }
+                }
+            }
+
+            // - If we don't know the size of the next message, we need to
+            //   read data in order to proceed.
+            // - If we *do* know the size of the message, we DON'T want to
+            //   read if we haven't got our byte permit yet, so only read
+            //   if we already have the byte permit.
+            if next_size.is_none() || byte_permit.is_some() {
                 let mut buf = tokio::io::ReadBuf::new(&mut buf);
                 match Pin::new(&mut con).poll_read(cx, &mut buf) {
                     Poll::Pending => return Poll::Pending,
@@ -380,12 +467,13 @@ async fn manage_read_con<I: Tx3PoolImp>(
                         if filled.is_empty() {
                             // the stream is closed
                             // exit gracefully
-                            // but we *still* need to set want_close
+                            // but we *still* need to set want_write_close
                             // so that the write side knows to
                             // start shutting down
-                            want_close.store(true, atomic::Ordering::Release);
+                            want_write_close.store(true, atomic::Ordering::Release);
                             return Poll::Ready(Ok(()));
                         }
+                        bandwidth.add(filled.len());
                         tracing::trace!(byte_count = ?filled.len(), "read bytes");
                         buf_data
                             .push(bytes::Bytes::copy_from_slice(filled));
@@ -395,6 +483,15 @@ async fn manage_read_con<I: Tx3PoolImp>(
 
             loop {
                 if next_size.is_none() {
+                    // next_size is only ever None here if we've completed
+                    // a previous message this invocation. If we have any
+                    // short follow-on messages already read, we might drop
+                    // them for no reason, but this simplifies the code for
+                    // now.
+                    if want_read_close.load(atomic::Ordering::Acquire) {
+                        return Poll::Ready(Ok(()));
+                    }
+
                     if buf_data.remaining() < 4 {
                         continue 'read_loop;
                     }
@@ -446,10 +543,11 @@ async fn manage_read_con<I: Tx3PoolImp>(
 }
 
 async fn manage_write_con<I: Tx3PoolImp>(
+    bandwidth: Bandwidth,
     con_drop: Arc<ManageConDrop<I>>,
     notify_writer: Arc<tokio::sync::Notify>,
     this: Arc<Mutex<ConStateInner<I>>>,
-    want_close: Arc<atomic::AtomicBool>,
+    want_write_close: Arc<atomic::AtomicBool>,
     mut con: tokio::io::WriteHalf<tx3::Tx3Connection>,
 ) -> Result<()> {
     // keep this until this task drops
@@ -480,7 +578,7 @@ async fn manage_write_con<I: Tx3PoolImp>(
             }
 
             if cur_msg.is_none() {
-                if want_close.load(atomic::Ordering::Acquire) {
+                if want_write_close.load(atomic::Ordering::Acquire) {
                     return Poll::Ready(Ok(()));
                 }
 
@@ -510,6 +608,7 @@ async fn manage_write_con<I: Tx3PoolImp>(
                     return Poll::Ready(Err(err2));
                 }
                 Poll::Ready(Ok(byte_count)) => {
+                    bandwidth.add(byte_count);
                     tracing::trace!(?byte_count, "wrote bytes");
                     let msg = cur_msg.as_mut().unwrap();
                     msg.content.advance(byte_count);
@@ -519,7 +618,7 @@ async fn manage_write_con<I: Tx3PoolImp>(
                             let _ = msg.resolve.send(Ok(()));
                         }
 
-                        if want_close.load(atomic::Ordering::Acquire) {
+                        if want_write_close.load(atomic::Ordering::Acquire) {
                             return Poll::Ready(Ok(()));
                         }
                     }
