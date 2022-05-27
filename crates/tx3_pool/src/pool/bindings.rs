@@ -6,6 +6,7 @@ use std::sync::atomic;
 pub(crate) struct Bindings<I: Tx3PoolImp> {
     config: Arc<Tx3PoolConfig>,
     pool_term: Term,
+    pool_uniq: Arc<String>,
     imp: Arc<I>,
     tls: tx3::tls::TlsConfig,
     cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
@@ -19,6 +20,7 @@ impl<I: Tx3PoolImp> Clone for Bindings<I> {
         Self {
             config: self.config.clone(),
             pool_term: self.pool_term.clone(),
+            pool_uniq: self.pool_uniq.clone(),
             imp: self.imp.clone(),
             tls: self.tls.clone(),
             cmd_send: self.cmd_send.clone(),
@@ -33,6 +35,7 @@ impl<I: Tx3PoolImp> Bindings<I> {
     pub async fn new(
         config: Arc<Tx3PoolConfig>,
         pool_term: Term,
+        pool_uniq: Arc<String>,
         imp: Arc<I>,
         tls: tx3::tls::TlsConfig,
         cmd_send: tokio::sync::mpsc::UnboundedSender<PoolStateCmd>,
@@ -57,6 +60,7 @@ impl<I: Tx3PoolImp> Bindings<I> {
         Ok(Self {
             config,
             pool_term,
+            pool_uniq,
             imp,
             tls,
             cmd_send,
@@ -90,9 +94,16 @@ impl<I: Tx3PoolImp> Bindings<I> {
         });
 
         if let Some(new_addr) = new_addr {
+            tracing::info!(
+                pool_uniq = %self.pool_uniq,
+                %new_addr,
+                "NewBinding",
+            );
+
             self.imp.get_pool_hooks().addr_update(new_addr);
         }
 
+        let pool_uniq = self.pool_uniq.clone();
         let inner = self.inner.clone();
         let imp = self.imp.clone();
         let bind_term = Term::new(
@@ -102,6 +113,12 @@ impl<I: Tx3PoolImp> Bindings<I> {
                     inner.terminate(binding_id)
                 });
                 if let Some(new_addr) = new_addr {
+                    tracing::info!(
+                        %pool_uniq,
+                        %new_addr,
+                        "BindingClosed",
+                    );
+
                     imp.get_pool_hooks().addr_update(new_addr);
                 }
             })),

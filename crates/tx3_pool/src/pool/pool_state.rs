@@ -17,9 +17,11 @@ pub(crate) enum PoolStateCmd {
     InboundAccept(Box<(tokio::sync::OwnedSemaphorePermit, tx3::Tx3Connection)>),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
     config: Arc<Tx3PoolConfig>,
     pool_term: Term,
+    pool_uniq: Arc<String>,
     bindings: Bindings<I>,
     imp: Arc<I>,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
@@ -63,6 +65,7 @@ pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
                         ConState::new(
                             config.clone(),
                             pool_term.clone(),
+                            pool_uniq.clone(),
                             inbound_send.clone(),
                             out_con_limit.clone(),
                             in_byte_limit.clone(),
@@ -82,6 +85,7 @@ pub(crate) async fn pool_state_task<I: Tx3PoolImp>(
                         ConState::new(
                             config.clone(),
                             pool_term.clone(),
+                            pool_uniq.clone(),
                             inbound_send.clone(),
                             out_con_limit.clone(),
                             in_byte_limit.clone(),

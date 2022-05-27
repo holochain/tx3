@@ -18,6 +18,7 @@ impl<I: Tx3PoolImp> ConState<I> {
     pub fn new(
         config: Arc<Tx3PoolConfig>,
         pool_term: Term,
+        pool_uniq: Arc<String>,
         inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
         out_con_limit: Arc<tokio::sync::Semaphore>,
         in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -29,6 +30,7 @@ impl<I: Tx3PoolImp> ConState<I> {
             inner: Arc::new(Mutex::new(ConStateInner::new(
                 config,
                 pool_term,
+                pool_uniq,
                 inbound_send,
                 out_con_limit,
                 in_byte_limit,
@@ -85,6 +87,7 @@ impl ConnectStep {
 struct ConStateInner<I: Tx3PoolImp> {
     config: Arc<Tx3PoolConfig>,
     pool_term: Term,
+    pool_uniq: Arc<String>,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     out_con_limit: Arc<tokio::sync::Semaphore>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -103,6 +106,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
     pub fn new(
         config: Arc<Tx3PoolConfig>,
         pool_term: Term,
+        pool_uniq: Arc<String>,
         inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
         out_con_limit: Arc<tokio::sync::Semaphore>,
         in_byte_limit: Arc<tokio::sync::Semaphore>,
@@ -113,6 +117,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
         Self {
             config,
             pool_term,
+            pool_uniq,
             inbound_send,
             out_con_limit,
             in_byte_limit,
@@ -151,7 +156,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
     }
 
     fn check_out_con(&mut self, this: Arc<Mutex<ConStateInner<I>>>) {
-        if !self.connect_step.is_active() {
+        if !self.msg_list.is_empty() && !self.connect_step.is_active() {
             self.connect_step = ConnectStep::PendingConnect;
             let this2 = this.clone();
             self.pool_term.spawn_err(
@@ -163,8 +168,7 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
                     this,
                     self.peer_id.clone(),
                 ),
-                move |err| {
-                    tracing::debug!(?err);
+                move |_err| {
                     ConStateInner::access(&this2, |inner| {
                         inner.connect_step = ConnectStep::NoConnection;
                     });
@@ -208,12 +212,14 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
         con_permit: tokio::sync::OwnedSemaphorePermit,
         con: tx3::Tx3Connection,
     ) {
+        let peer_id = con.remote_id().clone();
         match self.connect_step {
             ConnectStep::NoConnection | ConnectStep::PendingConnect => {
                 self.connect_step = ConnectStep::Connected;
                 spawn_manage_con(
                     self.config.clone(),
                     self.pool_term.clone(),
+                    self.pool_uniq.clone(),
                     self.inbound_send.clone(),
                     self.in_byte_limit.clone(),
                     self.imp.clone(),
@@ -225,7 +231,11 @@ impl<I: Tx3PoolImp> ConStateInner<I> {
                 );
             }
             ConnectStep::Connected => {
-                tracing::debug!("dropping con due to already connected");
+                tracing::info!(
+                    ?peer_id,
+                    pool_uniq = %self.pool_uniq,
+                    "DropConDupPeerId",
+                );
             }
         }
     }
@@ -244,7 +254,6 @@ async fn open_out_con<I: Tx3PoolImp>(
             out_con_limit.acquire_owned().await.map_err(other_err)?;
 
         let addr = imp.get_addr_store().lookup_addr(&peer_id).await?;
-        tracing::trace!(?addr, "addr for new out con");
 
         if !imp.get_pool_hooks().connect_pre(addr.clone()).await {
             return Err(other_err("connect_pre returned false"));
@@ -267,13 +276,24 @@ async fn open_out_con<I: Tx3PoolImp>(
 
 struct ManageConDrop<I: Tx3PoolImp> {
     _permit: tokio::sync::OwnedSemaphorePermit,
+    peer_id: Arc<Tx3Id>,
+    pool_uniq: Arc<String>,
+    con_uniq: Arc<String>,
     this: Arc<Mutex<ConStateInner<I>>>,
 }
 
 impl<I: Tx3PoolImp> Drop for ManageConDrop<I> {
     fn drop(&mut self) {
+        tracing::info!(
+            peer_id = ?self.peer_id,
+            pool_uniq = %self.pool_uniq,
+            con_uniq = %self.con_uniq,
+            "ConClosed",
+        );
+        let this2 = self.this.clone();
         ConStateInner::access(&self.this, |inner| {
             inner.connect_step = ConnectStep::NoConnection;
+            inner.check_out_con(this2);
         });
     }
 }
@@ -282,6 +302,7 @@ impl<I: Tx3PoolImp> Drop for ManageConDrop<I> {
 fn spawn_manage_con<I: Tx3PoolImp>(
     config: Arc<Tx3PoolConfig>,
     pool_term: Term,
+    pool_uniq: Arc<String>,
     inbound_send: tokio::sync::mpsc::UnboundedSender<InboundMsg>,
     in_byte_limit: Arc<tokio::sync::Semaphore>,
     _imp: Arc<I>,
@@ -292,6 +313,9 @@ fn spawn_manage_con<I: Tx3PoolImp>(
     con: tx3::Tx3Connection,
 ) {
     let peer_id = con.remote_id().clone();
+    let con_uniq = uniq();
+
+    tracing::info!(?peer_id, %pool_uniq, %con_uniq, "ConOpened");
 
     let con_term = Term::new("ConClosed", None);
 
@@ -299,6 +323,9 @@ fn spawn_manage_con<I: Tx3PoolImp>(
     // when both the reader and writer tasks have closed.
     let con_drop = Arc::new(ManageConDrop {
         _permit: con_permit,
+        peer_id: peer_id.clone(),
+        pool_uniq,
+        con_uniq,
         this: this.clone(),
     });
 
@@ -379,10 +406,9 @@ fn spawn_manage_con<I: Tx3PoolImp>(
                 want_write_close.clone(),
                 read_half,
             ),
-            move |err| {
+            move |_err| {
                 want_write_close.store(true, atomic::Ordering::Release);
                 con_term2.term();
-                tracing::debug!(?err);
             },
         );
     }
@@ -400,9 +426,8 @@ fn spawn_manage_con<I: Tx3PoolImp>(
             want_write_close,
             write_half,
         ),
-        move |err| {
+        move |_err| {
             con_term2.term();
-            tracing::debug!(?err);
         },
     );
 }
@@ -470,13 +495,12 @@ async fn manage_read_con<I: Tx3PoolImp>(
                             // but we *still* need to set want_write_close
                             // so that the write side knows to
                             // start shutting down
-                            want_write_close.store(true, atomic::Ordering::Release);
+                            want_write_close
+                                .store(true, atomic::Ordering::Release);
                             return Poll::Ready(Ok(()));
                         }
                         bandwidth.add(filled.len());
-                        tracing::trace!(byte_count = ?filled.len(), "read bytes");
-                        buf_data
-                            .push(bytes::Bytes::copy_from_slice(filled));
+                        buf_data.push(bytes::Bytes::copy_from_slice(filled));
                     }
                 }
             }
@@ -503,16 +527,11 @@ async fn manage_read_con<I: Tx3PoolImp>(
                     continue 'read_loop;
                 }
 
-                tracing::trace!(?next_size_unwrapped, "read len");
-
                 if byte_permit.is_none() {
                     if byte_permit_fut.is_none() {
                         let limit = in_byte_limit.clone();
                         byte_permit_fut = Some(Box::pin(async move {
-                            limit
-                                .acquire_owned()
-                                .await
-                                .map_err(other_err)
+                            limit.acquire_owned().await.map_err(other_err)
                         }));
                     }
 
@@ -609,11 +628,9 @@ async fn manage_write_con<I: Tx3PoolImp>(
                 }
                 Poll::Ready(Ok(byte_count)) => {
                     bandwidth.add(byte_count);
-                    tracing::trace!(?byte_count, "wrote bytes");
                     let msg = cur_msg.as_mut().unwrap();
                     msg.content.advance(byte_count);
                     if !msg.content.has_remaining() {
-                        tracing::trace!("completed msg send");
                         if let Some(msg) = cur_msg.take() {
                             let _ = msg.resolve.send(Ok(()));
                         }

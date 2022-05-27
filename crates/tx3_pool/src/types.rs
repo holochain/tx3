@@ -53,7 +53,6 @@ impl AddrStoreMem {
     /// Set an item in the memory address store.
     pub fn set<A: tx3::IntoAddr>(&self, addr: A) {
         let addr = addr.into_addr();
-        tracing::trace!(?addr, "AddrStoreMem::set");
         self.access(move |inner| {
             if let Some(id) = &addr.id {
                 inner.insert(id.clone(), addr);

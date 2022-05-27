@@ -55,10 +55,7 @@ impl Term {
         }
     }
 
-    /// Spawn a task that will be terminated on_term.
-    /// If terminated, the future will be dropped / cancelled.
-    /// If the future errors, the error callback will be invoked.
-    pub fn spawn_err<F, E>(&self, f: F, e: E)
+    fn spawn_err_inner<F, E>(&self, f: F, e: Option<E>)
     where
         F: 'static + Send + Future<Output = Result<()>>,
         E: 'static + Send + FnOnce(std::io::Error),
@@ -70,23 +67,34 @@ impl Term {
                 _ = on_term_fut => Err(other_err(term_note)),
                 r = f => r,
             } {
-                e(err);
+                if let Some(e) = e {
+                    e(err);
+                }
             }
         });
     }
 
     /// Spawn a task that will be terminated on_term.
     /// If terminated, the future will be dropped / cancelled.
-    /// If the future errors, the error will be output via `tracing::debug!()`.
+    /// If the future errors, the error callback will be invoked.
+    pub fn spawn_err<F, E>(&self, f: F, e: E)
+    where
+        F: 'static + Send + Future<Output = Result<()>>,
+        E: 'static + Send + FnOnce(std::io::Error),
+    {
+        self.spawn_err_inner(f, Some(e));
+    }
+
+    /// Spawn a task that will be terminated on_term.
+    /// If terminated, the future will be dropped / cancelled.
     pub fn spawn<F>(&self, f: F)
     where
         F: 'static + Send + Future<Output = Result<()>>,
     {
-        self.spawn_err(f, |err| tracing::debug!(?err));
+        self.spawn_err_inner(f, StubE::None);
     }
 
-    /// Like spawn_err, but terminates if either of two terms terminate.
-    pub fn spawn_err2<F, E>(term1: &Term, term2: &Term, f: F, e: E)
+    fn spawn_err2_inner<F, E>(term1: &Term, term2: &Term, f: F, e: Option<E>)
     where
         F: 'static + Send + Future<Output = Result<()>>,
         E: 'static + Send + FnOnce(std::io::Error),
@@ -101,9 +109,20 @@ impl Term {
                 _ = term2_fut => Err(other_err(term_note2)),
                 r = f => r,
             } {
-                e(err);
+                if let Some(e) = e {
+                    e(err);
+                }
             }
         });
+    }
+
+    /// Like spawn_err, but terminates if either of two terms terminate.
+    pub fn spawn_err2<F, E>(term1: &Term, term2: &Term, f: F, e: E)
+    where
+        F: 'static + Send + Future<Output = Result<()>>,
+        E: 'static + Send + FnOnce(std::io::Error),
+    {
+        Term::spawn_err2_inner(term1, term2, f, Some(e));
     }
 
     /// Like spawn, but terminates if either of two terms terminate.
@@ -111,6 +130,8 @@ impl Term {
     where
         F: 'static + Send + Future<Output = Result<()>>,
     {
-        Term::spawn_err2(term1, term2, f, |err| tracing::debug!(?err));
+        Term::spawn_err2_inner(term1, term2, f, StubE::None);
     }
 }
+
+type StubE = Option<Box<dyn FnOnce(std::io::Error) + 'static + Send>>;

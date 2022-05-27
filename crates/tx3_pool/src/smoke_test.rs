@@ -23,21 +23,21 @@ impl PoolHooks for MyHooks {
     type AcceptIdFut = futures::future::Ready<bool>;
 
     fn addr_update(&self, addr: Arc<Tx3Addr>) {
-        tracing::info!(?addr, "MyHooks::addr_update");
+        tracing::warn!(?addr, "MyHooks::addr_update");
     }
 
     fn connect_pre(&self, addr: Arc<Tx3Addr>) -> Self::ConnectPreFut {
-        tracing::info!(?addr, "MyHooks::connect_pre");
+        tracing::warn!(?addr, "MyHooks::connect_pre");
         futures::future::ready(true)
     }
 
     fn accept_addr(&self, addr: SocketAddr) -> Self::AcceptAddrFut {
-        tracing::info!(?addr, "MyHooks::accept_addr");
+        tracing::warn!(?addr, "MyHooks::accept_addr");
         futures::future::ready(true)
     }
 
     fn accept_id(&self, id: Arc<Tx3Id>) -> Self::AcceptAddrFut {
-        tracing::info!(?id, "MyHooks::accept_id");
+        tracing::warn!(?id, "MyHooks::accept_id");
         futures::future::ready(true)
     }
 }
@@ -65,17 +65,19 @@ impl Tx3PoolImp for MyImp {
 async fn smoke_test() {
     init_tracing();
 
-    let (pool1, mut recv1) =
-        Tx3Pool::new(Tx3PoolConfig::default(), Arc::new(MyImp::default()))
-            .await
-            .unwrap();
+    let mut config = Tx3PoolConfig::default();
+    config.con_tgt_time = std::time::Duration::from_secs(1);
+
+    let (pool1, mut recv1) = Tx3Pool::new(config, Arc::new(MyImp::default()))
+        .await
+        .unwrap();
 
     let r_task = tokio::task::spawn(async move {
         use bytes::Buf;
 
         for _ in 0..4 {
             let (id, msg) = recv1.recv().await.unwrap();
-            tracing::info!(?id, byte_count = ?msg.remaining());
+            tracing::warn!(?id, byte_count = ?msg.remaining(), "GOT MSG");
             assert_eq!(msg.to_vec().as_slice(), b"hello");
         }
     });
@@ -83,34 +85,27 @@ async fn smoke_test() {
     pool1.bind("tx3:-/st/127.0.0.1:0/").await.unwrap();
     let addr1 = pool1.local_addr().clone();
 
-    let (pool2, _) =
-        Tx3Pool::new(Tx3PoolConfig::default(), Arc::new(MyImp::default()))
-            .await
-            .unwrap();
+    let mut config = Tx3PoolConfig::default();
+    config.con_tgt_time = std::time::Duration::from_secs(1);
 
-    pool2.as_imp().get_addr_store().set(&addr1);
-
-    pool2
-        .send(
-            addr1.id.as_ref().unwrap().clone(),
-            b"hello",
-            std::time::Duration::from_secs(1),
-        )
+    let (pool2, _) = Tx3Pool::new(config, Arc::new(MyImp::default()))
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    pool2.as_imp().get_addr_store().set(&addr1);
 
-    let mut all = Vec::new();
-    for _ in 0..3 {
-        all.push(pool2.send(
-            addr1.id.as_ref().unwrap().clone(),
-            b"hello",
-            std::time::Duration::from_secs(1),
-        ));
+    for _ in 0..4 {
+        pool2
+            .send(
+                addr1.id.as_ref().unwrap().clone(),
+                b"hello",
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-
-    futures::future::try_join_all(all).await.unwrap();
 
     r_task.await.unwrap();
 

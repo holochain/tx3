@@ -64,7 +64,16 @@ use bytes::Buf;
 use std::future::Future;
 use std::io::Result;
 use std::net::SocketAddr;
+use std::sync::atomic;
 use std::sync::Arc;
+
+pub(crate) fn uniq() -> Arc<String> {
+    static UNIQ: atomic::AtomicUsize = atomic::AtomicUsize::new(10);
+    Arc::new(format!(
+        "{:x}",
+        UNIQ.fetch_add(1, atomic::Ordering::Relaxed)
+    ))
+}
 
 mod bandwidth;
 use bandwidth::*;
@@ -117,8 +126,6 @@ impl BindHnd {
 /// Tx3 connection pool.
 pub struct Tx3Pool<I: Tx3PoolImp> {
     config: Arc<Tx3PoolConfig>,
-    #[allow(dead_code)]
-    tls: tx3::tls::TlsConfig,
     pool_term: Term,
     imp: Arc<I>,
     bindings: Bindings<I>,
@@ -146,11 +153,31 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
 
         let (cmd_send, cmd_recv) = tokio::sync::mpsc::unbounded_channel();
 
-        let pool_term = Term::new("PoolClosed", None);
+        let pool_uniq = uniq();
+
+        tracing::info!(
+            local_id = ?tls.cert_digest(),
+            %pool_uniq,
+            "PoolOpened",
+        );
+
+        let pool_term = {
+            let pool_uniq = pool_uniq.clone();
+            Term::new(
+                "PoolClosed",
+                Some(Arc::new(move || {
+                    tracing::info!(
+                        %pool_uniq,
+                        "PoolClosed",
+                    );
+                })),
+            )
+        };
 
         let bindings = Bindings::new(
             config.clone(),
             pool_term.clone(),
+            pool_uniq.clone(),
             imp.clone(),
             tls.clone(),
             cmd_send.clone(),
@@ -165,6 +192,7 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
         pool_term.spawn(pool_state_task(
             config.clone(),
             pool_term.clone(),
+            pool_uniq,
             bindings.clone(),
             imp.clone(),
             inbound_send,
@@ -174,7 +202,6 @@ impl<I: Tx3PoolImp> Tx3Pool<I> {
 
         let this = Self {
             config,
-            tls,
             pool_term,
             imp,
             bindings,
