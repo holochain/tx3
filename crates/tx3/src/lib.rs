@@ -160,10 +160,7 @@
 
 #![doc = include_str!("docs/tx3_relay_help.md")]
 
-use std::future::Future;
 use std::io::Result;
-use std::sync::atomic;
-use std::sync::Arc;
 
 /// Tx3 helper until `std::io::Error::other()` is stablized
 pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
@@ -172,68 +169,8 @@ pub fn other_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
     std::io::Error::new(std::io::ErrorKind::Other, error)
 }
 
-/// Terminal notification helper utility.
-#[derive(Clone)]
-pub(crate) struct Term {
-    term: Arc<atomic::AtomicBool>,
-    sig: Arc<tokio::sync::Notify>,
-    trgr: Arc<dyn Fn() + 'static + Send + Sync>,
-}
-
-impl Term {
-    /// Construct a new term instance with optional term callback.
-    pub fn new(trgr: Option<Arc<dyn Fn() + 'static + Send + Sync>>) -> Self {
-        let trgr = trgr.unwrap_or_else(|| Arc::new(|| {}));
-        Self {
-            term: Arc::new(atomic::AtomicBool::new(false)),
-            sig: Arc::new(tokio::sync::Notify::new()),
-            trgr,
-        }
-    }
-
-    /// Trigger termination.
-    pub fn term(&self) {
-        self.term.store(true, atomic::Ordering::Release);
-        self.sig.notify_waiters();
-        (self.trgr)();
-    }
-
-    /*
-    /// Returns `true` if termination has been triggered.
-    pub fn is_term(&self) -> bool {
-        self.term.load(atomic::Ordering::Acquire)
-    }
-    */
-
-    /// Returns a future that will resolve when termination is triggered.
-    pub fn on_term(
-        &self,
-    ) -> impl std::future::Future<Output = ()> + 'static + Send + Unpin {
-        use std::pin::Pin;
-        use std::task::Poll;
-        let sig = self.sig.clone();
-        let mut fut = Box::pin(async move { sig.notified().await });
-        let term = self.term.clone();
-        futures::future::poll_fn(move |cx| {
-            if term.load(atomic::Ordering::Acquire) {
-                return Poll::Ready(());
-            }
-            match Pin::new(&mut fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => return Poll::Ready(()),
-            }
-            // even though we create the "notified" future first, there's still
-            // a small chance we could have missed the notification, between
-            // the previous flag load and when we called poll... so check again
-            if term.load(atomic::Ordering::Acquire) {
-                return Poll::Ready(());
-            }
-            // now, our cx is registered for wake, and we've double checked
-            // the flag, safe to return pending
-            Poll::Pending
-        })
-    }
-}
+pub mod util;
+use util::*;
 
 pub(crate) mod tcp;
 
