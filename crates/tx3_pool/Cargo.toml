@@ -1,6 +1,22 @@
 [package]
 name = "tx3_pool"
 version = "0.0.1"
+description = "tx3 p2p generic connection pool management"
+license = "Apache-2.0"
+homepage = "https://github.com/holochain/tx3"
+documentation = "https://docs.rs/tx3_pool"
+authors = ["Holochain Core Dev Team <devcore@holochain.org>"]
+keywords = ["holochain", "holo", "p2p", "tcp", "networking"]
+categories = ["network-programming"]
 edition = "2021"
 
 [dependencies]
+bytes = { version = "1.1.0", default-features = false, features = [ "std" ] }
+futures = { version = "0.3.21", default-features = false, features = [ "std" ] }
+parking_lot = { version = "0.12.0", default-features = false }
+tokio = { version = "1.18.0", default-features = false, features = [ "full" ] }
+tracing = { version = "0.1.34", default-features = false }
+tx3 = { version = "0.0.1", path = "../tx3", default-features = false }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3.11", features = [ "env-filter" ] }
