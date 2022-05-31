@@ -1,5 +1,7 @@
 use clap::Parser;
+use std::sync::Arc;
 use tx3::relay::*;
+use tx3::tls::*;
 use tx3::*;
 
 type Result<T> = std::result::Result<T, String>;
@@ -35,6 +37,9 @@ pub struct Tx3RelayConfigFile {
     /// tx3-relay config file
     #[serde(flatten)]
     pub tx3_relay: Tx3RelayConfig,
+
+    /// tls node id
+    pub tls_node_id: Arc<Tx3Id>,
 
     /// der-encoded certificate
     pub tls_cert_der: String,
@@ -152,6 +157,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
 
     let Tx3RelayConfigFile {
         mut tx3_relay,
+        tls_node_id,
         tls_cert_der,
         tls_cert_pk_der,
     } = conf;
@@ -189,7 +195,13 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Ok(tls) => tls,
     };
 
-    tx3_relay.tls = Some(tls);
+    if tls.cert_digest() != &tls_node_id {
+        return Err(
+            "tlsCertDer does not match tlsNodeId, corrupt config?".into()
+        );
+    }
+
+    tx3_relay.tls = tls;
     Ok(tx3_relay)
 }
 
@@ -211,12 +223,88 @@ async fn run_init(opt: Opt) -> Result<()> {
         Ok(file) => file,
     };
 
-    let (cert, cert_pk) = tls::gen_tls_cert_pair().unwrap();
-    let cert = base64::encode(&cert.0);
-    let cert_pk = base64::encode(&cert_pk.0);
+    let (cert_r, cert_r_pk) = tls::gen_tls_cert_pair().unwrap();
+    let cert = base64::encode(&cert_r.0);
+    let cert_pk = base64::encode(&cert_r_pk.0);
+
+    let tls = TlsConfigBuilder::default()
+        .with_cert(cert_r, cert_r_pk)
+        .build()
+        .map_err(|e| format!("{:?}", e))?;
+
+    let mut tx3_relay = Tx3RelayConfig::default();
+
+    let mut found_v4 = false;
+    let mut found_v6 = false;
+
+    use rand::Rng;
+    let port = rand::thread_rng().gen_range(32768..=60999);
+    for iface in get_if_addrs::get_if_addrs().map_err(|e| format!("{:?}", e))? {
+        let ip = iface.ip();
+        let is_loopback = ip.is_loopback();
+        let is_global = ip.ext_is_global();
+        let mut enabled = !is_loopback;
+        let mut notes = Vec::new();
+        notes.push(format!("iface: {}", iface.name));
+        if is_loopback {
+            notes.push("loopback: disabled".into());
+        }
+        if is_global {
+            notes.push("global: directly addressable".into());
+        }
+        if !is_loopback && !is_global {
+            notes
+                .push("private: configure port-forwarding, update host".into());
+        }
+        match ip {
+            std::net::IpAddr::V4(ip) => {
+                if !is_loopback {
+                    if found_v4 {
+                        enabled = false;
+                        notes.push("multiple v4: disabled".into());
+                    } else {
+                        found_v4 = true;
+                        notes.push("first_v4: enabled".into());
+                    }
+                }
+                tx3_relay.bind.push(Tx3RelayBindSpec {
+                    interface: std::net::SocketAddr::V4(
+                        std::net::SocketAddrV4::new(ip, port),
+                    ),
+                    host: ip.to_string(),
+                    port,
+                    enabled,
+                    allow_non_global_host: false,
+                    notes,
+                });
+            }
+            std::net::IpAddr::V6(ip) => {
+                if !is_loopback {
+                    if found_v6 {
+                        enabled = false;
+                        notes.push("multiple v6: disabled".into());
+                    } else {
+                        found_v6 = true;
+                        notes.push("first_v6: enabled".into());
+                    }
+                }
+                tx3_relay.bind.push(Tx3RelayBindSpec {
+                    interface: std::net::SocketAddr::V6(
+                        std::net::SocketAddrV6::new(ip, port, 0, 0),
+                    ),
+                    host: format!("[{}]", ip),
+                    port,
+                    enabled,
+                    allow_non_global_host: false,
+                    notes,
+                });
+            }
+        }
+    }
 
     let conf = Tx3RelayConfigFile {
-        tx3_relay: Tx3RelayConfig::default().with_bind("tx3:-/rst/0.0.0.0:0/"),
+        tx3_relay,
+        tls_node_id: tls.cert_digest().clone(),
         tls_cert_der: cert,
         tls_cert_pk_der: cert_pk,
     };

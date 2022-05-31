@@ -72,8 +72,10 @@ Note: Unless you're writing test code, you probably want the executable.
 See below for `tx3-relay` commandline flags and options.
 
 ```rust
-let tx3_relay_config = tx3::relay::Tx3RelayConfig::new()
-    .with_bind("tx3:-/rst/127.0.0.1:0/");
+let tx3_relay_config = tx3::relay::Tx3RelayConfig::default()
+    // The extra (true) on the end lets us use the loopback interface,
+    // normally that is an invalid configuration for a relay server.
+    .with_bind(([127, 0, 0, 1], 0, true));
 let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 
 println!("relay listening on address: {:?}", relay.local_addr());

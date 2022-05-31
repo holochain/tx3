@@ -49,11 +49,12 @@ async fn smoke_test_st() {
 async fn smoke_test_rst() {
     init_tracing();
 
-    let relay = Tx3Relay::new(
-        Tx3RelayConfig::default().with_bind("tx3:-/rst/127.0.0.1:0/"),
-    )
-    .await
-    .unwrap();
+    let relay_config = Tx3RelayConfig {
+        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        ..Default::default()
+    };
+
+    let relay = Tx3Relay::new(relay_config).await.unwrap();
     let addr_r = relay.local_addr().clone();
     tracing::info!(%addr_r);
 

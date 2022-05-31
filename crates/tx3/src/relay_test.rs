@@ -20,9 +20,11 @@ async fn relay_test_max_inbound_connections() {
 
     tracing::info!("setup relay");
 
-    let mut relay_config =
-        Tx3RelayConfig::new().with_bind("tx3:-/rst/127.0.0.1:0/");
-    relay_config.max_inbound_connections = 1;
+    let relay_config = Tx3RelayConfig {
+        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        max_inbound_connections: 1,
+        ..Default::default()
+    };
 
     let relay = Tx3Relay::new(relay_config).await.unwrap();
     let r_addr = relay.local_addr().clone();
@@ -65,9 +67,11 @@ async fn relay_test_max_control_streams() {
 
     tracing::info!("setup relay");
 
-    let mut relay_config =
-        Tx3RelayConfig::new().with_bind("tx3:-/rst/127.0.0.1:0/");
-    relay_config.max_control_streams = 1;
+    let relay_config = Tx3RelayConfig {
+        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        max_control_streams: 1,
+        ..Default::default()
+    };
 
     let relay = Tx3Relay::new(relay_config).await.unwrap();
     let r_addr = relay.local_addr().clone();
@@ -110,9 +114,11 @@ async fn relay_test_max_control_streams_per_ip() {
 
     tracing::info!("setup relay");
 
-    let mut relay_config =
-        Tx3RelayConfig::new().with_bind("tx3:-/rst/127.0.0.1:0/");
-    relay_config.max_control_streams_per_ip = 1;
+    let relay_config = Tx3RelayConfig {
+        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        max_control_streams_per_ip: 1,
+        ..Default::default()
+    };
 
     let relay = Tx3Relay::new(relay_config).await.unwrap();
     let r_addr = relay.local_addr().clone();
@@ -154,9 +160,11 @@ async fn relay_test_max_relays_per_control() {
 
     tracing::info!("setup relay");
 
-    let mut relay_config =
-        Tx3RelayConfig::new().with_bind("tx3:-/rst/127.0.0.1:0/");
-    relay_config.max_relays_per_control = 1;
+    let relay_config = Tx3RelayConfig {
+        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        max_relays_per_control: 1,
+        ..Default::default()
+    };
 
     let relay = Tx3Relay::new(relay_config).await.unwrap();
     let r_addr = relay.local_addr().clone();

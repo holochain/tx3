@@ -14,6 +14,29 @@ use std::sync::Arc;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tx3Id(pub [u8; 32]);
 
+impl serde::Serialize for Tx3Id {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_b64())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Tx3Id {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let tmp: String = serde::Deserialize::deserialize(deserializer)?;
+        Tx3Id::from_b64_inner(&tmp).map_err(D::Error::custom)
+    }
+}
+
 impl std::fmt::Debug for Tx3Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut a = self.to_b64();
@@ -43,8 +66,7 @@ impl AsRef<[u8]> for Tx3Id {
 }
 
 impl Tx3Id {
-    /// Decode a base64 encoded Tx3Id.
-    pub fn from_b64(s: &str) -> Result<Arc<Self>> {
+    fn from_b64_inner(s: &str) -> Result<Self> {
         let v = base64::decode_config(s, base64::URL_SAFE_NO_PAD)
             .map_err(other_err)?;
         if v.len() != 32 {
@@ -52,7 +74,12 @@ impl Tx3Id {
         }
         let mut out = [0; 32];
         out.copy_from_slice(&v);
-        Ok(Arc::new(Self(out)))
+        Ok(Self(out))
+    }
+
+    /// Decode a base64 encoded Tx3Id.
+    pub fn from_b64(s: &str) -> Result<Arc<Self>> {
+        Tx3Id::from_b64_inner(s).map(Arc::new)
     }
 
     /// Encode a Tx3Id as base64.
@@ -275,8 +302,20 @@ impl Tx3Addr {
     }
 }
 
-trait IpAddrExt {
+/// Helper until is_global is stablized.
+pub trait IpAddrExt {
+    /// Helper until is_global is stablized.
     fn ext_is_global(&self) -> bool;
+}
+
+impl IpAddrExt for IpAddr {
+    #[inline]
+    fn ext_is_global(&self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.ext_is_global(),
+            IpAddr::V6(a) => a.ext_is_global(),
+        }
+    }
 }
 
 impl IpAddrExt for Ipv4Addr {

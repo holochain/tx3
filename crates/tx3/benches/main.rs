@@ -146,9 +146,11 @@ struct BenchTx3rst {
 
 impl BenchTx3rst {
     pub async fn new(data: Arc<[u8]>) -> Self {
-        let relay = Tx3Relay::new(
-            Tx3RelayConfig::default().with_bind("tx3:-/rst/127.0.0.1:0/"),
-        )
+        let relay = Tx3Relay::new(Tx3RelayConfig::default().with_bind((
+            [127, 0, 0, 1],
+            0,
+            true,
+        )))
         .await
         .unwrap();
 

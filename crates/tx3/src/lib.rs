@@ -78,8 +78,10 @@
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! let tx3_relay_config = tx3::relay::Tx3RelayConfig::new()
-//!     .with_bind("tx3:-/rst/127.0.0.1:0/");
+//! let tx3_relay_config = tx3::relay::Tx3RelayConfig::default()
+//!     // The extra (true) on the end lets us use the loopback interface,
+//!     // normally that is an invalid configuration for a relay server.
+//!     .with_bind(([127, 0, 0, 1], 0, true));
 //! let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 //!
 //! println!("relay listening on address: {:?}", relay.local_addr());
@@ -91,8 +93,8 @@
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! # let tx3_relay_config = tx3::relay::Tx3RelayConfig::new()
-//! #     .with_bind("tx3:-/rst/127.0.0.1:0/");
+//! # let tx3_relay_config = tx3::relay::Tx3RelayConfig::default()
+//! #     .with_bind(([127, 0, 0, 1], 0, true));
 //! # let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 //! # let relay_addr = relay.local_addr().clone();
 //! # let relay_addr = &relay_addr;
@@ -176,6 +178,9 @@ pub(crate) mod tcp;
 
 mod addr;
 pub use addr::*;
+
+mod bind;
+pub use bind::*;
 
 mod config;
 pub use config::*;

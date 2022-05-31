@@ -355,6 +355,9 @@ async fn bind_tx3_rst_inner(
         return Err(other_err("InvalidPeerCert"));
     }
 
+    // send the "control-stream" con type (as opposed to address reflect, etc)
+    control_socket.write_all(&[0]).await?;
+
     // read the "all-clear" byte before spawning the task
     let mut all_clear = [0];
     control_socket.read_exact(&mut all_clear).await?;
