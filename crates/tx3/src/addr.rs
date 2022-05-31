@@ -62,7 +62,7 @@ impl Tx3Id {
 }
 
 /// Available stacks for tx3 backend transports.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tx3Stack {
     /// `st` - direct TLS over TCP stream socket.
     TlsTcp(String),
@@ -107,7 +107,7 @@ impl Tx3Stack {
 /// A Tx3 Addr is a canonical peer identifier grouped with a prioritized
 /// list of stacks at which the peer can be reached.
 /// A Tx3 Addr can be encoded as a `tx3:` url.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tx3Addr {
     /// Peer identifier.
     pub id: Option<Arc<Tx3Id>>,

@@ -205,7 +205,7 @@ impl Drop for Tx3Relay {
 impl Tx3Relay {
     /// Construct/bind a new Tx3Relay server instance with given config
     pub async fn new(mut config: Tx3RelayConfig) -> Result<Self> {
-        let shutdown = Term::new(None);
+        let shutdown = Term::new("RelayShutdown", None);
 
         if config.tls.is_none() {
             config.tls = Some(TlsConfigBuilder::default().build()?);
@@ -302,14 +302,9 @@ async fn bind_tx3_rst(
         out.push(Arc::new(Tx3Stack::RelayTlsTcp(a.to_string())));
     }
 
-    tokio::task::spawn(async move {
+    shutdown.clone().spawn(async move {
         loop {
-            let res = tokio::select! {
-                _ = shutdown.on_term() => break,
-                r = listener.accept() => r,
-            };
-
-            match res {
+            match listener.accept().await {
                 Err(err) => {
                     tracing::warn!(?err, "accept error");
                 }
@@ -333,21 +328,14 @@ async fn bind_tx3_rst(
                         Ok(socket) => socket,
                     };
 
-                    let shutdown = shutdown.clone();
-                    let process_socket_fut = process_socket(
+                    shutdown.spawn(process_socket(
                         config.clone(),
                         socket,
                         addr,
                         state.clone(),
                         con_permit,
                         control_limit.clone(),
-                    );
-                    tokio::task::spawn(async move {
-                        tokio::select! {
-                            _ = shutdown.on_term() => (),
-                            _ = process_socket_fut => (),
-                        }
-                    });
+                    ));
                 }
             }
         }
@@ -405,28 +393,6 @@ impl RelayStateSync {
 }
 
 async fn process_socket(
-    config: Arc<Tx3RelayConfig>,
-    socket: tokio::net::TcpStream,
-    rem_addr: SocketAddr,
-    state: RelayStateSync,
-    con_permit: tokio::sync::OwnedSemaphorePermit,
-    control_limit: Arc<tokio::sync::Semaphore>,
-) {
-    if let Err(err) = process_socket_err(
-        config,
-        socket,
-        rem_addr,
-        state,
-        con_permit,
-        control_limit,
-    )
-    .await
-    {
-        tracing::debug!(?err, "process_socket error");
-    }
-}
-
-async fn process_socket_err(
     config: Arc<Tx3RelayConfig>,
     mut socket: tokio::net::TcpStream,
     rem_addr: SocketAddr,
