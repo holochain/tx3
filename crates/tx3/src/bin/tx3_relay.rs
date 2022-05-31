@@ -238,7 +238,7 @@ async fn run_init(opt: Opt) -> Result<()> {
     let mut found_v6 = false;
 
     use rand::Rng;
-    let port = rand::thread_rng().gen_range(32768..=60999);
+    let port = rand::thread_rng().gen_range(32768..60999);
     for iface in get_if_addrs::get_if_addrs().map_err(|e| format!("{:?}", e))? {
         let ip = iface.ip();
         let is_loopback = ip.is_loopback();
@@ -267,12 +267,12 @@ async fn run_init(opt: Opt) -> Result<()> {
                         notes.push("first_v4: enabled".into());
                     }
                 }
-                tx3_relay.bind.push(Tx3RelayBindSpec {
-                    interface: std::net::SocketAddr::V4(
+                tx3_relay.bind.push(Tx3BindSpec {
+                    local_interface: std::net::SocketAddr::V4(
                         std::net::SocketAddrV4::new(ip, port),
                     ),
-                    host: ip.to_string(),
-                    port,
+                    wan_host: ip.to_string(),
+                    wan_port: port,
                     enabled,
                     allow_non_global_host: false,
                     notes,
@@ -288,12 +288,12 @@ async fn run_init(opt: Opt) -> Result<()> {
                         notes.push("first_v6: enabled".into());
                     }
                 }
-                tx3_relay.bind.push(Tx3RelayBindSpec {
-                    interface: std::net::SocketAddr::V6(
+                tx3_relay.bind.push(Tx3BindSpec {
+                    local_interface: std::net::SocketAddr::V6(
                         std::net::SocketAddrV6::new(ip, port, 0, 0),
                     ),
-                    host: format!("[{}]", ip),
-                    port,
+                    wan_host: format!("[{}]", ip),
+                    wan_port: port,
                     enabled,
                     allow_non_global_host: false,
                     notes,

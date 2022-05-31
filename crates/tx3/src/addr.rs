@@ -7,7 +7,7 @@ use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::net::SocketAddr;
+//use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Tx3 node/peer identifier. Sha256 digest of DER encoded tls certificate.
@@ -134,10 +134,10 @@ impl Tx3Stack {
 /// A Tx3 Addr is a canonical peer identifier grouped with a prioritized
 /// list of stacks at which the peer can be reached.
 /// A Tx3 Addr can be encoded as a `tx3:` url.
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tx3Addr {
     /// Peer identifier.
-    pub id: Option<Arc<Tx3Id>>,
+    pub id: Arc<Tx3Id>,
 
     /// Prioritized list of stacks.
     pub stack_list: Vec<Arc<Tx3Stack>>,
@@ -160,8 +160,9 @@ impl<'de> serde::Deserialize<'de> for Tx3Addr {
     where
         D: serde::Deserializer<'de>,
     {
+        use serde::de::Error;
         let tmp: String = serde::Deserialize::deserialize(deserializer)?;
-        Ok(tmp.into())
+        Tx3Addr::from_url_str(&tmp).map_err(D::Error::custom)
     }
 }
 
@@ -180,49 +181,52 @@ impl std::fmt::Display for Tx3Addr {
 /// Indicates a type that can be turned into an `Arc<Tx3Addr>`.
 pub trait IntoAddr {
     /// Convert this type into an `Arc<Tx3Addr>`.
-    fn into_addr(self) -> Arc<Tx3Addr>;
+    fn into_addr(self) -> Result<Arc<Tx3Addr>>;
 }
 
 impl IntoAddr for Arc<Tx3Addr> {
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        self
+    #[inline(always)]
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(self)
     }
 }
 
 impl IntoAddr for &Arc<Tx3Addr> {
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        self.clone()
+    #[inline(always)]
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(self.clone())
     }
 }
 
 impl IntoAddr for &str {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(self)?))
     }
 }
 
 impl IntoAddr for String {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(&self)?))
     }
 }
 
 impl IntoAddr for &String {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(self)?))
     }
 }
 
 impl IntoAddr for url::Url {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url(self)?))
     }
 }
 
+/*
 impl From<&str> for Tx3Addr {
     #[inline(always)]
     fn from(s: &str) -> Self {
@@ -257,7 +261,7 @@ impl From<url::Url> for Tx3Addr {
             None => return this,
             Some(id) => {
                 if let Ok(id) = Tx3Id::from_b64(id) {
-                    this.id = Some(id);
+                    this.id = id;
                 }
             }
         }
@@ -279,17 +283,14 @@ impl From<url::Url> for Tx3Addr {
         this
     }
 }
+*/
 
 impl Tx3Addr {
     /// Encode this addr instance as a url.
     pub fn to_url(&self) -> String {
         let mut out = String::new();
         out.push_str("tx3:");
-        if let Some(id) = &self.id {
-            out.push_str(&id.to_b64());
-        } else {
-            out.push('-');
-        }
+        out.push_str(&self.id.to_b64());
         out.push('/');
         for stack in self.stack_list.iter() {
             let (k, v) = stack.as_pair();
@@ -299,6 +300,46 @@ impl Tx3Addr {
             out.push('/');
         }
         out
+    }
+
+    /// Decode an addr instance from a url string.
+    pub fn from_url_str(url: &str) -> Result<Self> {
+        let url = url::Url::parse(url).map_err(other_err)?;
+        Self::from_url(url)
+    }
+
+    /// Decode an addr instance from a url.
+    pub fn from_url(url: url::Url) -> Result<Self> {
+        let mut iter = url.path().split_terminator('/');
+
+        let id = match iter.next() {
+            None => return Err(other_err("InvalidId")),
+            Some(id) => {
+                if let Ok(id) = Tx3Id::from_b64(id) {
+                    id
+                } else {
+                    return Err(other_err("InvalidId"));
+                }
+            }
+        };
+
+        let mut stack_list = Vec::new();
+
+        loop {
+            let k = match iter.next() {
+                None => break,
+                Some(k) => k,
+            };
+
+            let v = match iter.next() {
+                None => return Err(other_err("InvalidStackPair")),
+                Some(v) => v,
+            };
+
+            stack_list.push(Arc::new(Tx3Stack::from_pair(k, v)));
+        }
+
+        Ok(Self { id, stack_list })
     }
 }
 
@@ -357,6 +398,7 @@ impl IpAddrExt for Ipv6Addr {
     }
 }
 
+/*
 pub(crate) fn upgrade_addr(addr: SocketAddr) -> Result<Vec<SocketAddr>> {
     let port = addr.port();
     Ok(match &addr {
@@ -422,3 +464,4 @@ pub(crate) fn upgrade_addr(addr: SocketAddr) -> Result<Vec<SocketAddr>> {
         }
     })
 }
+*/

@@ -179,13 +179,12 @@ pub(crate) mod tcp;
 mod addr;
 pub use addr::*;
 
-mod bind;
-pub use bind::*;
-
 mod config;
 pub use config::*;
 
 pub mod tls;
+
+pub mod reflect;
 
 mod connection;
 pub use connection::*;

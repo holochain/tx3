@@ -91,103 +91,6 @@ fn default_connection_timeout_ms() -> u32 {
     1000 * 20
 }
 
-fn is_false(v: &bool) -> bool {
-    !*v
-}
-
-/// An interface binding specification for relay nodes.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Tx3RelayBindSpec {
-    /// The interface socket address to bind.
-    pub interface: std::net::SocketAddr,
-
-    /// The global public host name (or address) to publish.
-    /// This can be the same as the interface address if this server
-    /// is directly bound to a global ip address. If this is an ip
-    /// v6 address, it should include the square brackets ("[..]").
-    pub host: String,
-
-    /// The global public port to publish.
-    pub port: u16,
-
-    /// If set to false, this binding should be ignored.
-    pub enabled: bool,
-
-    /// Normally a relay will error if the public host binding is not
-    /// globally addressable. For testing, you can disable this check.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_non_global_host: bool,
-
-    /// User notes about this binding.
-    #[serde(default)]
-    pub notes: Vec<String>,
-}
-
-impl From<([u8; 4], u16)> for Tx3RelayBindSpec {
-    fn from(s: ([u8; 4], u16)) -> Self {
-        let ip = s.0.into();
-        Tx3RelayBindSpec {
-            interface: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                ip, s.1,
-            )),
-            host: ip.to_string(),
-            port: s.1,
-            enabled: true,
-            allow_non_global_host: false,
-            notes: Vec::new(),
-        }
-    }
-}
-
-impl From<([u8; 4], u16, bool)> for Tx3RelayBindSpec {
-    fn from(s: ([u8; 4], u16, bool)) -> Self {
-        let ip = s.0.into();
-        Tx3RelayBindSpec {
-            interface: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                ip, s.1,
-            )),
-            host: ip.to_string(),
-            port: s.1,
-            enabled: true,
-            allow_non_global_host: s.2,
-            notes: Vec::new(),
-        }
-    }
-}
-
-impl From<([u8; 16], u16)> for Tx3RelayBindSpec {
-    fn from(s: ([u8; 16], u16)) -> Self {
-        let ip = s.0.into();
-        Tx3RelayBindSpec {
-            interface: std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-                ip, s.1, 0, 0,
-            )),
-            host: format!("[{}]", ip),
-            port: s.1,
-            enabled: true,
-            allow_non_global_host: false,
-            notes: Vec::new(),
-        }
-    }
-}
-
-impl From<([u8; 16], u16, bool)> for Tx3RelayBindSpec {
-    fn from(s: ([u8; 16], u16, bool)) -> Self {
-        let ip = s.0.into();
-        Tx3RelayBindSpec {
-            interface: std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-                ip, s.1, 0, 0,
-            )),
-            host: format!("[{}]", ip),
-            port: s.1,
-            enabled: true,
-            allow_non_global_host: s.2,
-            notes: Vec::new(),
-        }
-    }
-}
-
 /// A wrapper around Tx3Config with some additional parameters specific
 /// to configuring a relay server.
 #[non_exhaustive]
@@ -195,15 +98,14 @@ impl From<([u8; 16], u16, bool)> for Tx3RelayBindSpec {
 #[serde(rename_all = "camelCase")]
 pub struct Tx3RelayConfig {
     /// Tls configuration to use for this tx3 relay node.
-    #[serde(skip)]
-    #[serde(default = "default_tls")]
+    #[serde(skip, default = "default_tls")]
     pub tls: TlsConfig,
 
     /// The interface addresses to bind for this relay node.
     /// In general, this should include exactly one ipv4 address
     /// and exactly one ipv6 address.
     #[serde(default)]
-    pub bind: Vec<Tx3RelayBindSpec>,
+    pub bind: Vec<Tx3BindSpec>,
 
     /// The maximum incoming connections that will be allowed. Any incoming
     /// connections beyond this limit will be dropped without response.
@@ -267,7 +169,7 @@ impl Default for Tx3RelayConfig {
 
 impl Tx3RelayConfig {
     /// Push a bind spec into the list of bindings for this config.
-    pub fn with_bind<B: Into<Tx3RelayBindSpec>>(mut self, bind: B) -> Self {
+    pub fn with_bind<B: Into<Tx3BindSpec>>(mut self, bind: B) -> Self {
         self.bind.push(bind.into());
         self
     }
@@ -329,7 +231,7 @@ impl Tx3Relay {
             .collect();
 
         let addr = Arc::new(Tx3Addr {
-            id: Some(config.tls.cert_digest().clone()),
+            id: config.tls.cert_digest().clone(),
             stack_list,
         });
 
@@ -355,30 +257,15 @@ impl Tx3Relay {
 
 async fn bind_tx3_rst(
     config: Arc<Tx3RelayConfig>,
-    bind: Tx3RelayBindSpec,
+    bind: Tx3BindSpec,
     state: RelayStateSync,
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
     shutdown: Term,
 ) -> Result<Arc<Tx3Stack>> {
-    let listener = tokio::net::TcpListener::bind(&bind.interface).await?;
-    let mut port = bind.port;
-    if port == 0 {
-        port = listener.local_addr()?.port();
-    }
-
-    let out_addr = format!("{}:{}", &bind.host, port);
-    if !bind.allow_non_global_host {
-        for addr in tokio::net::lookup_host(&out_addr).await? {
-            if !addr.ip().ext_is_global() {
-                return Err(other_err(format!(
-                    "{}({}) is not globally addressable, cannot bind. Configure port forwarding and adjust host string.",
-                    out_addr,
-                    addr,
-                )));
-            }
-        }
-    }
+    let listener = tokio::net::TcpListener::bind(&bind.local_interface).await?;
+    let port = listener.local_addr()?.port();
+    let out_addr = bind.resolve_binding(port).await?;
 
     let out = Arc::new(Tx3Stack::RelayTlsTcp(out_addr));
 
