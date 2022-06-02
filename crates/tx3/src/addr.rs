@@ -7,12 +7,34 @@ use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Tx3 node/peer identifier. Sha256 digest of DER encoded tls certificate.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tx3Id(pub [u8; 32]);
+
+impl serde::Serialize for Tx3Id {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_b64())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Tx3Id {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let tmp: String = serde::Deserialize::deserialize(deserializer)?;
+        Tx3Id::from_b64_inner(&tmp).map_err(D::Error::custom)
+    }
+}
 
 impl std::fmt::Debug for Tx3Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,8 +65,7 @@ impl AsRef<[u8]> for Tx3Id {
 }
 
 impl Tx3Id {
-    /// Decode a base64 encoded Tx3Id.
-    pub fn from_b64(s: &str) -> Result<Arc<Self>> {
+    fn from_b64_inner(s: &str) -> Result<Self> {
         let v = base64::decode_config(s, base64::URL_SAFE_NO_PAD)
             .map_err(other_err)?;
         if v.len() != 32 {
@@ -52,7 +73,12 @@ impl Tx3Id {
         }
         let mut out = [0; 32];
         out.copy_from_slice(&v);
-        Ok(Arc::new(Self(out)))
+        Ok(Self(out))
+    }
+
+    /// Decode a base64 encoded Tx3Id.
+    pub fn from_b64(s: &str) -> Result<Arc<Self>> {
+        Tx3Id::from_b64_inner(s).map(Arc::new)
     }
 
     /// Encode a Tx3Id as base64.
@@ -107,10 +133,10 @@ impl Tx3Stack {
 /// A Tx3 Addr is a canonical peer identifier grouped with a prioritized
 /// list of stacks at which the peer can be reached.
 /// A Tx3 Addr can be encoded as a `tx3:` url.
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tx3Addr {
     /// Peer identifier.
-    pub id: Option<Arc<Tx3Id>>,
+    pub id: Arc<Tx3Id>,
 
     /// Prioritized list of stacks.
     pub stack_list: Vec<Arc<Tx3Stack>>,
@@ -133,8 +159,9 @@ impl<'de> serde::Deserialize<'de> for Tx3Addr {
     where
         D: serde::Deserializer<'de>,
     {
+        use serde::de::Error;
         let tmp: String = serde::Deserialize::deserialize(deserializer)?;
-        Ok(tmp.into())
+        Tx3Addr::from_url_str(&tmp).map_err(D::Error::custom)
     }
 }
 
@@ -153,103 +180,48 @@ impl std::fmt::Display for Tx3Addr {
 /// Indicates a type that can be turned into an `Arc<Tx3Addr>`.
 pub trait IntoAddr {
     /// Convert this type into an `Arc<Tx3Addr>`.
-    fn into_addr(self) -> Arc<Tx3Addr>;
+    fn into_addr(self) -> Result<Arc<Tx3Addr>>;
 }
 
 impl IntoAddr for Arc<Tx3Addr> {
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        self
+    #[inline(always)]
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(self)
     }
 }
 
 impl IntoAddr for &Arc<Tx3Addr> {
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        self.clone()
+    #[inline(always)]
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(self.clone())
     }
 }
 
 impl IntoAddr for &str {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(self)?))
     }
 }
 
 impl IntoAddr for String {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(&self)?))
     }
 }
 
 impl IntoAddr for &String {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url_str(self)?))
     }
 }
 
 impl IntoAddr for url::Url {
     #[inline(always)]
-    fn into_addr(self) -> Arc<Tx3Addr> {
-        Arc::new(self.into())
-    }
-}
-
-impl From<&str> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: &str) -> Self {
-        match url::Url::parse(s) {
-            Ok(url) => url.into(),
-            Err(_) => Tx3Addr::default(),
-        }
-    }
-}
-
-impl From<String> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: String) -> Self {
-        s.as_str().into()
-    }
-}
-
-impl From<&String> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: &String) -> Self {
-        s.as_str().into()
-    }
-}
-
-impl From<url::Url> for Tx3Addr {
-    fn from(url: url::Url) -> Self {
-        let mut this = Tx3Addr::default();
-
-        let mut iter = url.path().split_terminator('/');
-
-        match iter.next() {
-            None => return this,
-            Some(id) => {
-                if let Ok(id) = Tx3Id::from_b64(id) {
-                    this.id = Some(id);
-                }
-            }
-        }
-
-        loop {
-            let k = match iter.next() {
-                None => break,
-                Some(k) => k,
-            };
-
-            let v = match iter.next() {
-                None => return this,
-                Some(v) => v,
-            };
-
-            this.stack_list.push(Arc::new(Tx3Stack::from_pair(k, v)));
-        }
-
-        this
+    fn into_addr(self) -> Result<Arc<Tx3Addr>> {
+        Ok(Arc::new(Tx3Addr::from_url(self)?))
     }
 }
 
@@ -258,11 +230,7 @@ impl Tx3Addr {
     pub fn to_url(&self) -> String {
         let mut out = String::new();
         out.push_str("tx3:");
-        if let Some(id) = &self.id {
-            out.push_str(&id.to_b64());
-        } else {
-            out.push('-');
-        }
+        out.push_str(&self.id.to_b64());
         out.push('/');
         for stack in self.stack_list.iter() {
             let (k, v) = stack.as_pair();
@@ -273,10 +241,62 @@ impl Tx3Addr {
         }
         out
     }
+
+    /// Decode an addr instance from a url string.
+    pub fn from_url_str(url: &str) -> Result<Self> {
+        let url = url::Url::parse(url).map_err(other_err)?;
+        Self::from_url(url)
+    }
+
+    /// Decode an addr instance from a url.
+    pub fn from_url(url: url::Url) -> Result<Self> {
+        let mut iter = url.path().split_terminator('/');
+
+        let id = match iter.next() {
+            None => return Err(other_err("InvalidId")),
+            Some(id) => {
+                if let Ok(id) = Tx3Id::from_b64(id) {
+                    id
+                } else {
+                    return Err(other_err("InvalidId"));
+                }
+            }
+        };
+
+        let mut stack_list = Vec::new();
+
+        loop {
+            let k = match iter.next() {
+                None => break,
+                Some(k) => k,
+            };
+
+            let v = match iter.next() {
+                None => return Err(other_err("InvalidStackPair")),
+                Some(v) => v,
+            };
+
+            stack_list.push(Arc::new(Tx3Stack::from_pair(k, v)));
+        }
+
+        Ok(Self { id, stack_list })
+    }
 }
 
-trait IpAddrExt {
+/// Helper until is_global is stablized.
+pub trait IpAddrExt {
+    /// Helper until is_global is stablized.
     fn ext_is_global(&self) -> bool;
+}
+
+impl IpAddrExt for IpAddr {
+    #[inline]
+    fn ext_is_global(&self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.ext_is_global(),
+            IpAddr::V6(a) => a.ext_is_global(),
+        }
+    }
 }
 
 impl IpAddrExt for Ipv4Addr {
@@ -316,70 +336,4 @@ impl IpAddrExt for Ipv6Addr {
             //&& !self.is_documentation()
             && !((self.segments()[0] == 0x2001) && (self.segments()[1] == 0xdb8))
     }
-}
-
-pub(crate) fn upgrade_addr(addr: SocketAddr) -> Result<Vec<SocketAddr>> {
-    let port = addr.port();
-    Ok(match &addr {
-        SocketAddr::V4(a) => {
-            if a.ip() == &Ipv4Addr::UNSPECIFIED {
-                let mut loopback = None;
-                let mut lan = None;
-                let mut out = Vec::new();
-                for iface in get_if_addrs::get_if_addrs()? {
-                    if let IpAddr::V4(a) = iface.ip() {
-                        if a.ext_is_global() {
-                            out.push((a, port).into());
-                        } else {
-                            if loopback.is_none() && a.is_loopback() {
-                                loopback = Some((a, port).into());
-                            }
-                            if lan.is_none() && !a.is_loopback() {
-                                lan = Some((a, port).into());
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() && lan.is_some() {
-                    out.push(lan.take().unwrap());
-                }
-                if out.is_empty() && loopback.is_some() {
-                    out.push(loopback.take().unwrap());
-                }
-                out
-            } else {
-                vec![addr]
-            }
-        }
-        SocketAddr::V6(a) => {
-            if a.ip() == &Ipv6Addr::UNSPECIFIED {
-                let mut loopback = None;
-                let mut lan = None;
-                let mut out = Vec::new();
-                for iface in get_if_addrs::get_if_addrs()? {
-                    if let IpAddr::V6(a) = iface.ip() {
-                        if a.ext_is_global() {
-                            out.push((a, port).into());
-                        } else {
-                            if loopback.is_none() && a.is_loopback() {
-                                loopback = Some((a, port).into());
-                            }
-                            if lan.is_none() && !a.is_loopback() {
-                                lan = Some((a, port).into());
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() && lan.is_some() {
-                    out.push(lan.take().unwrap());
-                }
-                if out.is_empty() && loopback.is_some() {
-                    out.push(loopback.take().unwrap());
-                }
-                out
-            } else {
-                vec![addr]
-            }
-        }
-    })
 }

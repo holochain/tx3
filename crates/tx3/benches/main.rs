@@ -79,7 +79,11 @@ struct BenchTx3st {
 impl BenchTx3st {
     pub async fn new(data: Arc<[u8]>) -> Self {
         let (r_ep, mut recv) = Tx3Node::new(
-            Tx3Config::default().with_bind("tx3:-/st/127.0.0.1:0/"),
+            Tx3Config::default()
+                .with_bind(("127.0.0.1:0", true))
+                .unwrap()
+                .with_bind(("[::1]:0", true))
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -95,7 +99,15 @@ impl BenchTx3st {
             out
         });
 
-        let (s_ep, _) = Tx3Node::new(Tx3Config::default()).await.unwrap();
+        let (s_ep, _) = Tx3Node::new(
+            Tx3Config::default()
+                .with_bind(("127.0.0.1:0", true))
+                .unwrap()
+                .with_bind(("[::1]:0", true))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         let mut send = Vec::with_capacity(COUNT);
         for _ in 0..COUNT {
@@ -147,7 +159,11 @@ struct BenchTx3rst {
 impl BenchTx3rst {
     pub async fn new(data: Arc<[u8]>) -> Self {
         let relay = Tx3Relay::new(
-            Tx3RelayConfig::default().with_bind("tx3:-/rst/127.0.0.1:0/"),
+            Tx3RelayConfig::default()
+                .with_bind(("127.0.0.1:0", true))
+                .unwrap()
+                .with_bind(("[::1]:0", true))
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -155,7 +171,7 @@ impl BenchTx3rst {
         let r_addr = relay.local_addr().clone();
 
         let (r_ep, mut recv) =
-            Tx3Node::new(Tx3Config::default().with_bind(r_addr))
+            Tx3Node::new(Tx3Config::default().with_relay(r_addr).unwrap())
                 .await
                 .unwrap();
 
@@ -170,7 +186,15 @@ impl BenchTx3rst {
             out
         });
 
-        let (s_ep, _) = Tx3Node::new(Tx3Config::default()).await.unwrap();
+        let (s_ep, _) = Tx3Node::new(
+            Tx3Config::default()
+                .with_bind(("127.0.0.1:0", true))
+                .unwrap()
+                .with_bind(("[::1]:0", true))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         let mut send = Vec::with_capacity(COUNT);
         for _ in 0..COUNT {

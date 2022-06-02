@@ -67,6 +67,10 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
+fn default_tls() -> TlsConfig {
+    TlsConfigBuilder::default().build().unwrap()
+}
+
 fn default_max_inbound_connections() -> u32 {
     20480
 }
@@ -93,9 +97,15 @@ fn default_connection_timeout_ms() -> u32 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tx3RelayConfig {
-    /// The standard tx3 configuration parameters.
-    #[serde(flatten)]
-    pub tx3_config: Tx3Config,
+    /// Tls configuration to use for this tx3 relay node.
+    #[serde(skip, default = "default_tls")]
+    pub tls: TlsConfig,
+
+    /// The interface addresses to bind for this relay node.
+    /// In general, this should include exactly one ipv4 address
+    /// and exactly one ipv6 address.
+    #[serde(default)]
+    pub bind: Vec<Tx3BindSpec>,
 
     /// The maximum incoming connections that will be allowed. Any incoming
     /// connections beyond this limit will be dropped without response.
@@ -146,7 +156,8 @@ pub struct Tx3RelayConfig {
 impl Default for Tx3RelayConfig {
     fn default() -> Self {
         Self {
-            tx3_config: Tx3Config::default(),
+            tls: default_tls(),
+            bind: Vec::new(),
             max_inbound_connections: default_max_inbound_connections(),
             max_control_streams: default_max_control_streams(),
             max_control_streams_per_ip: default_max_control_streams_per_ip(),
@@ -157,33 +168,10 @@ impl Default for Tx3RelayConfig {
 }
 
 impl Tx3RelayConfig {
-    /// Construct a new default Tx3RelayConfig
-    pub fn new() -> Self {
-        Tx3RelayConfig::default()
-    }
-
-    /// Append a bind to the list of bindings
-    /// (shadow the deref builder function so we return ourselves)
-    pub fn with_bind<A>(mut self, bind: A) -> Self
-    where
-        A: IntoAddr,
-    {
-        self.tx3_config.bind.push(bind.into_addr());
-        self
-    }
-}
-
-impl std::ops::Deref for Tx3RelayConfig {
-    type Target = Tx3Config;
-
-    fn deref(&self) -> &Self::Target {
-        &self.tx3_config
-    }
-}
-
-impl std::ops::DerefMut for Tx3RelayConfig {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tx3_config
+    /// Push a bind spec into the list of bindings for this config.
+    pub fn with_bind<B: IntoBindSpec>(mut self, bind: B) -> Result<Self> {
+        self.bind.push(bind.into_bind_spec()?);
+        Ok(self)
     }
 }
 
@@ -207,10 +195,6 @@ impl Tx3Relay {
     pub async fn new(mut config: Tx3RelayConfig) -> Result<Self> {
         let shutdown = Term::new("RelayShutdown", None);
 
-        if config.tls.is_none() {
-            config.tls = Some(TlsConfigBuilder::default().build()?);
-        }
-
         let state = RelayStateSync::new();
 
         let mut all_bind = Vec::new();
@@ -228,41 +212,26 @@ impl Tx3Relay {
         ));
 
         for bind in to_bind {
-            for stack in bind.stack_list.iter() {
-                match &**stack {
-                    Tx3Stack::RelayTlsTcp(addr) => {
-                        for addr in tokio::net::lookup_host(addr)
-                            .await
-                            .map_err(other_err)?
-                        {
-                            all_bind.push(bind_tx3_rst(
-                                config.clone(),
-                                addr,
-                                state.clone(),
-                                inbound_limit.clone(),
-                                control_limit.clone(),
-                                shutdown.clone(),
-                            ));
-                        }
-                    }
-                    oth => {
-                        return Err(other_err(format!(
-                            "Unsupported Stack: {}",
-                            oth
-                        )));
-                    }
-                }
+            if !bind.enabled {
+                continue;
             }
+            all_bind.push(bind_tx3_rst(
+                config.clone(),
+                bind,
+                state.clone(),
+                inbound_limit.clone(),
+                control_limit.clone(),
+                shutdown.clone(),
+            ));
         }
 
         let stack_list = futures::future::try_join_all(all_bind)
             .await?
             .into_iter()
-            .flatten()
             .collect();
 
         let addr = Arc::new(Tx3Addr {
-            id: Some(config.priv_tls().cert_digest().clone()),
+            id: config.tls.cert_digest().clone(),
             stack_list,
         });
 
@@ -277,7 +246,7 @@ impl Tx3Relay {
 
     /// Get the local TLS certificate digest associated with this relay
     pub fn local_id(&self) -> &Arc<Tx3Id> {
-        self.config.priv_tls().cert_digest()
+        self.config.tls.cert_digest()
     }
 
     /// Get our bound addresses, if any
@@ -288,19 +257,17 @@ impl Tx3Relay {
 
 async fn bind_tx3_rst(
     config: Arc<Tx3RelayConfig>,
-    addr: SocketAddr,
+    bind: Tx3BindSpec,
     state: RelayStateSync,
     inbound_limit: Arc<tokio::sync::Semaphore>,
     control_limit: Arc<tokio::sync::Semaphore>,
     shutdown: Term,
-) -> Result<Vec<Arc<Tx3Stack>>> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let addr = listener.local_addr()?;
-    let mut out = Vec::new();
+) -> Result<Arc<Tx3Stack>> {
+    let listener = tokio::net::TcpListener::bind(&bind.local_interface).await?;
+    let port = listener.local_addr()?.port();
+    let out_addr = bind.resolve_binding(port).await?;
 
-    for a in upgrade_addr(addr)? {
-        out.push(Arc::new(Tx3Stack::RelayTlsTcp(a.to_string())));
-    }
+    let out = Arc::new(Tx3Stack::RelayTlsTcp(out_addr));
 
     shutdown.clone().spawn(async move {
         loop {
@@ -309,6 +276,8 @@ async fn bind_tx3_rst(
                     tracing::warn!(?err, "accept error");
                 }
                 Ok((socket, addr)) => {
+                    tracing::trace!(?addr, "inbound connection");
+
                     let con_permit = match inbound_limit
                         .clone()
                         .try_acquire_owned()
@@ -403,7 +372,7 @@ async fn process_socket(
     let timeout = tokio::time::Instant::now()
         + std::time::Duration::from_millis(config.connection_timeout_ms as u64);
 
-    let this_cert = config.priv_tls().cert_digest().clone();
+    let this_cert = config.tls.cert_digest().clone();
 
     // all rst connections must initiate by sending a 32 byte token
     let mut token = [0; 32];
@@ -537,14 +506,28 @@ async fn process_relay_control(
     con_permit: tokio::sync::OwnedSemaphorePermit,
     control_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
-    let socket = tokio::time::timeout_at(
+    let mut socket = tokio::time::timeout_at(
         timeout,
-        Tx3Connection::priv_accept(config.priv_tls().clone(), socket),
+        Tx3Connection::priv_accept(config.tls.clone(), socket),
     )
     .await??;
 
     let remote_cert = socket.remote_id().clone();
     tracing::debug!(cert = ?remote_cert, "control stream established");
+
+    let mut con_type = [0];
+    tokio::time::timeout_at(timeout, socket.read_exact(&mut con_type))
+        .await??;
+
+    tracing::trace!(?con_type);
+
+    if con_type[0] > 1 {
+        return Err(other_err("InvalidConType"));
+    }
+
+    if con_type[0] == 1 {
+        return Err(other_err("TodoAddressReflect"));
+    }
 
     let (ctrl_send, ctrl_recv) = tokio::sync::mpsc::channel(1);
 

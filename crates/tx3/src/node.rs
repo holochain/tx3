@@ -73,10 +73,6 @@ impl Tx3Node {
 
         let shutdown = Term::new("NodeShutdown", None);
 
-        if config.tls.is_none() {
-            config.tls = Some(TlsConfigBuilder::default().build()?);
-        }
-
         let (con_send, con_recv) = tokio::sync::mpsc::channel(1);
 
         let mut all_bind = Vec::new();
@@ -85,56 +81,62 @@ impl Tx3Node {
 
         let config = Arc::new(config);
 
+        let mut bound_v4 = false;
+        let mut bound_v6 = false;
+
         for bind in to_bind {
-            for stack in bind.stack_list.iter() {
-                match &**stack {
-                    Tx3Stack::TlsTcp(addr) => {
-                        for addr in tokio::net::lookup_host(addr)
-                            .await
-                            .map_err(other_err)?
-                        {
-                            all_bind.push(
-                                bind_tx3_st(
-                                    config.clone(),
-                                    addr,
-                                    con_send.clone(),
-                                    shutdown.clone(),
-                                )
-                                .boxed(),
-                            );
-                        }
-                    }
-                    Tx3Stack::RelayTlsTcp(addr) => {
-                        match &bind.id {
-                            None => return Err(other_err("InvalidRstCert")),
-                            Some(cert_digest) => {
-                                // we are connecting to a remote relay
-                                let addrs = tokio::net::lookup_host(addr)
-                                    .await
-                                    .map_err(other_err)?
-                                    .collect();
-                                all_bind.push(
-                                    bind_tx3_rst(
-                                        config.clone(),
-                                        bind.clone(),
-                                        addrs,
-                                        cert_digest.clone(),
-                                        con_send.clone(),
-                                        shutdown.clone(),
-                                    )
-                                    .boxed(),
-                                );
+            if !bind.enabled {
+                continue;
+            }
+            if bind.local_interface.is_ipv4() {
+                bound_v4 = true;
+            }
+            if bind.local_interface.is_ipv6() {
+                bound_v6 = true;
+            }
+            all_bind.push(
+                bind_tx3_st(
+                    config.clone(),
+                    bind,
+                    con_send.clone(),
+                    shutdown.clone(),
+                )
+                .boxed(),
+            );
+        }
+
+        // TODO - check for interfaces with global addrs
+        //      - reflection check to verify wan host / port??
+
+        if !bound_v4 || !bound_v6 {
+            let mut addrs = Vec::new();
+            for relay in config.relay_list.iter() {
+                for stack in relay.stack_list.iter() {
+                    match &**stack {
+                        Tx3Stack::RelayTlsTcp(addr) => {
+                            for addr in tokio::net::lookup_host(addr)
+                                .await
+                                .map_err(other_err)?
+                            {
+                                addrs.push((relay.clone(), addr));
                             }
                         }
-                    }
-                    oth => {
-                        return Err(other_err(format!(
-                            "Unsupported Stack: {}",
-                            oth,
-                        )))
+                        _ => return Err(other_err("InvalidRelayStack")),
                     }
                 }
             }
+            if addrs.is_empty() {
+                return Err(other_err("MissingV4OrV6AddrAndNoRelaySpecified"));
+            }
+            all_bind.push(
+                bind_tx3_rst(
+                    config.clone(),
+                    addrs,
+                    con_send.clone(),
+                    shutdown.clone(),
+                )
+                .boxed(),
+            );
         }
 
         let stack_list = futures::future::try_join_all(all_bind)
@@ -144,7 +146,7 @@ impl Tx3Node {
             .collect();
 
         let addr = Arc::new(Tx3Addr {
-            id: Some(config.priv_tls().cert_digest().clone()),
+            id: config.tls.cert_digest().clone(),
             stack_list,
         });
 
@@ -160,7 +162,7 @@ impl Tx3Node {
 
     /// Get the local TLS certificate digest associated with this node
     pub fn local_id(&self) -> &Arc<Tx3Id> {
-        self.config.priv_tls().cert_digest()
+        self.config.tls.cert_digest()
     }
 
     /// Get our local bound addr.
@@ -173,7 +175,7 @@ impl Tx3Node {
     where
         A: IntoAddr,
     {
-        let peer = peer.into_addr();
+        let peer = peer.into_addr()?;
         let mut errs = Vec::new();
         for stack in peer.stack_list.iter() {
             match &**stack {
@@ -188,26 +190,23 @@ impl Tx3Node {
                         }
                     }
                 }
-                Tx3Stack::RelayTlsTcp(addr) => match &peer.id {
-                    None => return Err(other_err("InvalidRstCert")),
-                    Some(tgt_cert_digest) => {
-                        for addr in tokio::net::lookup_host(addr)
-                            .await
-                            .map_err(other_err)?
+                Tx3Stack::RelayTlsTcp(addr) => {
+                    for addr in tokio::net::lookup_host(addr)
+                        .await
+                        .map_err(other_err)?
+                    {
+                        match connect_tx3_rst(
+                            self.config.clone(),
+                            addr,
+                            peer.id.clone(),
+                        )
+                        .await
                         {
-                            match connect_tx3_rst(
-                                self.config.clone(),
-                                addr,
-                                tgt_cert_digest.clone(),
-                            )
-                            .await
-                            {
-                                Err(e) => errs.push(e),
-                                Ok(con) => return Ok(con),
-                            }
+                            Err(e) => errs.push(e),
+                            Ok(con) => return Ok(con),
                         }
                     }
-                },
+                }
                 oth => {
                     return Err(other_err(format!(
                         "Unsupported Stack: {}",
@@ -253,16 +252,15 @@ impl Tx3InboundAcceptRst {
 
 async fn bind_tx3_st(
     config: Arc<Tx3Config>,
-    addr: SocketAddr,
+    bind: Tx3BindSpec,
     con_send: tokio::sync::mpsc::Sender<(Tx3InboundAccept, SocketAddr)>,
     shutdown: Term,
 ) -> Result<Vec<Arc<Tx3Stack>>> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let addr = listener.local_addr()?;
-    let mut out = Vec::new();
-    for a in upgrade_addr(addr)? {
-        out.push(Arc::new(Tx3Stack::TlsTcp(a.to_string())));
-    }
+    let listener = tokio::net::TcpListener::bind(&bind.local_interface).await?;
+    let port = listener.local_addr()?.port();
+    let out_addr = bind.resolve_binding(port).await?;
+
+    let out = Arc::new(Tx3Stack::TlsTcp(out_addr));
 
     shutdown.spawn(async move {
         loop {
@@ -280,7 +278,7 @@ async fn bind_tx3_st(
                         Err(e) => Tx3InboundAcceptInner::Err(e),
                         Ok(socket) => {
                             Tx3InboundAcceptInner::Tx3st(Tx3InboundAcceptSt {
-                                tls: config.priv_tls().clone(),
+                                tls: config.tls.clone(),
                                 socket,
                             })
                         }
@@ -300,24 +298,22 @@ async fn bind_tx3_st(
         Ok(())
     });
 
-    Ok(out)
+    Ok(vec![out])
 }
 
 async fn bind_tx3_rst(
     config: Arc<Tx3Config>,
-    relay_addr: Arc<Tx3Addr>,
-    addrs: Vec<SocketAddr>,
-    tgt_cert_digest: Arc<Tx3Id>,
+    addrs: Vec<(Arc<Tx3Addr>, SocketAddr)>,
     con_send: tokio::sync::mpsc::Sender<(Tx3InboundAccept, SocketAddr)>,
     shutdown: Term,
 ) -> Result<Vec<Arc<Tx3Stack>>> {
     let mut errs = Vec::new();
 
-    for addr in addrs {
+    for (relay_addr, addr) in addrs {
         match bind_tx3_rst_inner(
             config.clone(),
             addr,
-            tgt_cert_digest.clone(),
+            relay_addr.id.clone(),
             con_send.clone(),
             shutdown.clone(),
         )
@@ -349,11 +345,13 @@ async fn bind_tx3_rst_inner(
     let mut control_socket = crate::tcp::tx3_tcp_connect(addr).await?;
     control_socket.write_all(&tgt_cert_digest[..]).await?;
     let mut control_socket =
-        Tx3Connection::priv_connect(config.priv_tls().clone(), control_socket)
-            .await?;
+        Tx3Connection::priv_connect(config.tls.clone(), control_socket).await?;
     if control_socket.remote_id() != &tgt_cert_digest {
         return Err(other_err("InvalidPeerCert"));
     }
+
+    // send the "control-stream" con type (as opposed to address reflect, etc)
+    control_socket.write_all(&[0]).await?;
 
     // read the "all-clear" byte before spawning the task
     let mut all_clear = [0];
@@ -394,7 +392,7 @@ async fn bind_tx3_rst_inner(
             splice_token.copy_from_slice(&buf[18..]);
 
             let ib_fut = Tx3InboundAcceptInner::Tx3rst(Tx3InboundAcceptRst {
-                tls: config.priv_tls().clone(),
+                tls: config.tls.clone(),
                 addr,
                 splice_token: Arc::new(splice_token),
             });
@@ -419,7 +417,7 @@ async fn connect_tx3_st(
     addr: SocketAddr,
 ) -> Result<Tx3Connection> {
     let socket = crate::tcp::tx3_tcp_connect(addr).await?;
-    Tx3Connection::priv_connect(config.priv_tls().clone(), socket).await
+    Tx3Connection::priv_connect(config.tls.clone(), socket).await
 }
 
 async fn connect_tx3_rst(
@@ -429,5 +427,5 @@ async fn connect_tx3_rst(
 ) -> Result<Tx3Connection> {
     let mut socket = crate::tcp::tx3_tcp_connect(addr).await?;
     socket.write_all(&tgt_cert_digest[..]).await?;
-    Tx3Connection::priv_connect(config.priv_tls().clone(), socket).await
+    Tx3Connection::priv_connect(config.tls.clone(), socket).await
 }
