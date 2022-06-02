@@ -162,7 +162,7 @@ USAGE:
 
 OPTIONS:
     -c, --config <CONFIG>    Configuration file to use for running the
-                             tx3-relay. [default: ./tx3-relay.yml]
+                             tx3-relay. Defaults to `$user_config_dir_path$/tx3-relay.yml`.
     -h, --help               Print help information
     -i, --init               Initialize a new tx3-relay.yml configuration file
                              (as specified by --config).

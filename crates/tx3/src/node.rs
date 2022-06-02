@@ -105,6 +105,9 @@ impl Tx3Node {
             );
         }
 
+        // TODO - check for interfaces with global addrs
+        //      - reflection check to verify wan host / port??
+
         if !bound_v4 || !bound_v6 {
             let mut addrs = Vec::new();
             for relay in config.relay_list.iter() {
@@ -135,60 +138,6 @@ impl Tx3Node {
                 .boxed(),
             );
         }
-
-        /*
-        for bind in to_bind {
-            for stack in bind.stack_list.iter() {
-                match &**stack {
-                    Tx3Stack::TlsTcp(addr) => {
-                        for addr in tokio::net::lookup_host(addr)
-                            .await
-                            .map_err(other_err)?
-                        {
-                            all_bind.push(
-                                bind_tx3_st(
-                                    config.clone(),
-                                    addr,
-                                    con_send.clone(),
-                                    shutdown.clone(),
-                                )
-                                .boxed(),
-                            );
-                        }
-                    }
-                    Tx3Stack::RelayTlsTcp(addr) => {
-                        match &bind.id {
-                            None => return Err(other_err("InvalidRstCert")),
-                            Some(cert_digest) => {
-                                // we are connecting to a remote relay
-                                let addrs = tokio::net::lookup_host(addr)
-                                    .await
-                                    .map_err(other_err)?
-                                    .collect();
-                                all_bind.push(
-                                    bind_tx3_rst(
-                                        config.clone(),
-                                        bind.clone(),
-                                        addrs,
-                                        cert_digest.clone(),
-                                        con_send.clone(),
-                                        shutdown.clone(),
-                                    )
-                                    .boxed(),
-                                );
-                            }
-                        }
-                    }
-                    oth => {
-                        return Err(other_err(format!(
-                            "Unsupported Stack: {}",
-                            oth,
-                        )))
-                    }
-                }
-            }
-        }
-        */
 
         let stack_list = futures::future::try_join_all(all_bind)
             .await?

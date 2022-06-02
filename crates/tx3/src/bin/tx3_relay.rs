@@ -20,14 +20,9 @@ struct Opt {
     init: bool,
 
     /// Configuration file to use for running the
-    /// tx3-relay.
-    #[clap(
-        short,
-        long,
-        verbatim_doc_comment,
-        default_value = "./tx3-relay.yml"
-    )]
-    config: std::path::PathBuf,
+    /// tx3-relay. Defaults to `$user_config_dir_path$/tx3-relay.yml`.
+    #[clap(short, long, verbatim_doc_comment)]
+    config: Option<std::path::PathBuf>,
 }
 
 #[non_exhaustive]
@@ -69,7 +64,16 @@ async fn main() {
 }
 
 async fn main_err() -> Result<()> {
-    let opt = Opt::parse();
+    let mut opt = Opt::parse();
+    if opt.config.is_none() {
+        let mut config = dirs::config_dir().unwrap_or_else(|| {
+            let mut config = std::path::PathBuf::new();
+            config.push(".");
+            config
+        });
+        config.push("tx3-relay.yml");
+        opt.config = Some(config);
+    }
 
     if opt.init {
         return run_init(opt).await;
@@ -94,25 +98,24 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncReadExt;
 
-    let mut file = match tokio::fs::OpenOptions::new()
-        .read(true)
-        .open(&opt.config)
-        .await
-    {
-        Err(err) => {
-            return Err(format!(
-                "Failed to open config file {:?}: {:?}",
-                opt.config, err,
-            ))
-        }
-        Ok(file) => file,
-    };
+    let config = opt.config.as_ref().unwrap();
+
+    let mut file =
+        match tokio::fs::OpenOptions::new().read(true).open(config).await {
+            Err(err) => {
+                return Err(format!(
+                    "Failed to open config file {:?}: {:?}",
+                    config, err,
+                ))
+            }
+            Ok(file) => file,
+        };
 
     let perms = match file.metadata().await {
         Err(err) => {
             return Err(format!(
                 "Failed to load config file metadata {:?}: {:?}",
-                opt.config, err
+                config, err
             ))
         }
         Ok(perms) => perms.permissions(),
@@ -121,7 +124,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
     if !perms.readonly() {
         return Err(format!(
             "Refusing to run with writable config file {:?}",
-            opt.config
+            config
         ));
     }
 
@@ -131,7 +134,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         if mode != 0o400 {
             return Err(format!(
                 "Refusing to run with config file not set to mode 0o400 {:?} 0o{:o}",
-                opt.config,
+                config,
                 mode,
             ));
         }
@@ -141,7 +144,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
     if let Err(err) = file.read_to_string(&mut conf).await {
         return Err(format!(
             "Failed to read config file {:?}: {:?}",
-            opt.config, err,
+            config, err,
         ));
     }
 
@@ -149,7 +152,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Err(err) => {
             return Err(format!(
                 "Failed to parse config file {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(res) => res,
@@ -166,7 +169,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Err(err) => {
             return Err(format!(
                 "Failed to parse config file {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(cert) => tls::TlsCertDer(cert.into_boxed_slice()),
@@ -176,7 +179,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Err(err) => {
             return Err(format!(
                 "Failed to parse config file {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(pk) => tls::TlsPkDer(pk.into_boxed_slice()),
@@ -189,7 +192,7 @@ async fn read_config(opt: Opt) -> Result<Tx3RelayConfig> {
         Err(err) => {
             return Err(format!(
                 "Failed to build TlsConfig from config file {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(tls) => tls,
@@ -210,14 +213,16 @@ async fn run_init(opt: Opt) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
 
+    let config = opt.config.as_ref().unwrap();
+
     let mut file = tokio::fs::OpenOptions::new();
     file.create_new(true);
     file.write(true);
-    let mut file = match file.open(&opt.config).await {
+    let mut file = match file.open(config).await {
         Err(err) => {
             return Err(format!(
                 "Failed to create config file {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(file) => file,
@@ -313,7 +318,7 @@ async fn run_init(opt: Opt) -> Result<()> {
     if let Err(err) = file.write_all(conf.as_bytes()).await {
         return Err(format!(
             "Failed to initialize config file {:?}: {:?}",
-            opt.config, err
+            config, err
         ));
     };
 
@@ -321,7 +326,7 @@ async fn run_init(opt: Opt) -> Result<()> {
         Err(err) => {
             return Err(format!(
                 "Failed to load config file metadata {:?}: {:?}",
-                opt.config, err,
+                config, err,
             ))
         }
         Ok(perms) => perms.permissions(),
@@ -334,7 +339,7 @@ async fn run_init(opt: Opt) -> Result<()> {
     if let Err(err) = file.set_permissions(perms).await {
         return Err(format!(
             "Failed to set config file permissions {:?}: {:?}",
-            opt.config, err,
+            config, err,
         ));
     }
 
@@ -342,7 +347,7 @@ async fn run_init(opt: Opt) -> Result<()> {
         return Err(format!("Failed to flush/close config file: {:?}", err));
     }
 
-    println!("# tx3-relay wrote {:?} #", opt.config);
+    println!("# tx3-relay wrote {:?} #", config);
 
     Ok(())
 }

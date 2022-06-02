@@ -7,7 +7,6 @@ use crate::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-//use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Tx3 node/peer identifier. Sha256 digest of DER encoded tls certificate.
@@ -226,65 +225,6 @@ impl IntoAddr for url::Url {
     }
 }
 
-/*
-impl From<&str> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: &str) -> Self {
-        match url::Url::parse(s) {
-            Ok(url) => url.into(),
-            Err(_) => Tx3Addr::default(),
-        }
-    }
-}
-
-impl From<String> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: String) -> Self {
-        s.as_str().into()
-    }
-}
-
-impl From<&String> for Tx3Addr {
-    #[inline(always)]
-    fn from(s: &String) -> Self {
-        s.as_str().into()
-    }
-}
-
-impl From<url::Url> for Tx3Addr {
-    fn from(url: url::Url) -> Self {
-        let mut this = Tx3Addr::default();
-
-        let mut iter = url.path().split_terminator('/');
-
-        match iter.next() {
-            None => return this,
-            Some(id) => {
-                if let Ok(id) = Tx3Id::from_b64(id) {
-                    this.id = id;
-                }
-            }
-        }
-
-        loop {
-            let k = match iter.next() {
-                None => break,
-                Some(k) => k,
-            };
-
-            let v = match iter.next() {
-                None => return this,
-                Some(v) => v,
-            };
-
-            this.stack_list.push(Arc::new(Tx3Stack::from_pair(k, v)));
-        }
-
-        this
-    }
-}
-*/
-
 impl Tx3Addr {
     /// Encode this addr instance as a url.
     pub fn to_url(&self) -> String {
@@ -397,71 +337,3 @@ impl IpAddrExt for Ipv6Addr {
             && !((self.segments()[0] == 0x2001) && (self.segments()[1] == 0xdb8))
     }
 }
-
-/*
-pub(crate) fn upgrade_addr(addr: SocketAddr) -> Result<Vec<SocketAddr>> {
-    let port = addr.port();
-    Ok(match &addr {
-        SocketAddr::V4(a) => {
-            if a.ip() == &Ipv4Addr::UNSPECIFIED {
-                let mut loopback = None;
-                let mut lan = None;
-                let mut out = Vec::new();
-                for iface in get_if_addrs::get_if_addrs()? {
-                    if let IpAddr::V4(a) = iface.ip() {
-                        if a.ext_is_global() {
-                            out.push((a, port).into());
-                        } else {
-                            if loopback.is_none() && a.is_loopback() {
-                                loopback = Some((a, port).into());
-                            }
-                            if lan.is_none() && !a.is_loopback() {
-                                lan = Some((a, port).into());
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() && lan.is_some() {
-                    out.push(lan.take().unwrap());
-                }
-                if out.is_empty() && loopback.is_some() {
-                    out.push(loopback.take().unwrap());
-                }
-                out
-            } else {
-                vec![addr]
-            }
-        }
-        SocketAddr::V6(a) => {
-            if a.ip() == &Ipv6Addr::UNSPECIFIED {
-                let mut loopback = None;
-                let mut lan = None;
-                let mut out = Vec::new();
-                for iface in get_if_addrs::get_if_addrs()? {
-                    if let IpAddr::V6(a) = iface.ip() {
-                        if a.ext_is_global() {
-                            out.push((a, port).into());
-                        } else {
-                            if loopback.is_none() && a.is_loopback() {
-                                loopback = Some((a, port).into());
-                            }
-                            if lan.is_none() && !a.is_loopback() {
-                                lan = Some((a, port).into());
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() && lan.is_some() {
-                    out.push(lan.take().unwrap());
-                }
-                if out.is_empty() && loopback.is_some() {
-                    out.push(loopback.take().unwrap());
-                }
-                out
-            } else {
-                vec![addr]
-            }
-        }
-    })
-}
-*/
