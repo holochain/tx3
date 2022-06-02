@@ -169,9 +169,9 @@ impl Default for Tx3RelayConfig {
 
 impl Tx3RelayConfig {
     /// Push a bind spec into the list of bindings for this config.
-    pub fn with_bind<B: Into<Tx3BindSpec>>(mut self, bind: B) -> Self {
-        self.bind.push(bind.into());
-        self
+    pub fn with_bind<B: IntoBindSpec>(mut self, bind: B) -> Result<Self> {
+        self.bind.push(bind.into_bind_spec()?);
+        Ok(self)
     }
 }
 

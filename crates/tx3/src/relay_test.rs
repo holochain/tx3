@@ -21,7 +21,10 @@ async fn relay_test_max_inbound_connections() {
     tracing::info!("setup relay");
 
     let relay_config = Tx3RelayConfig {
-        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        bind: vec![
+            ("127.0.0.1:0", true).into_bind_spec().unwrap(),
+            ("[::1]:0", true).into_bind_spec().unwrap(),
+        ],
         max_inbound_connections: 1,
         ..Default::default()
     };
@@ -32,14 +35,14 @@ async fn relay_test_max_inbound_connections() {
     tracing::info!("first connection");
 
     // make the first connection
-    let node1 = Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    let node1 = Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .unwrap();
 
     tracing::info!("second (expect to fail) connection");
 
     // the second connection should error
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_err());
 
@@ -54,7 +57,7 @@ async fn relay_test_max_inbound_connections() {
     tracing::info!("third connection");
 
     // the third connection should be a success again
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_ok());
 }
@@ -68,7 +71,10 @@ async fn relay_test_max_control_streams() {
     tracing::info!("setup relay");
 
     let relay_config = Tx3RelayConfig {
-        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        bind: vec![
+            ("127.0.0.1:0", true).into_bind_spec().unwrap(),
+            ("[::1]:0", true).into_bind_spec().unwrap(),
+        ],
         max_control_streams: 1,
         ..Default::default()
     };
@@ -79,14 +85,14 @@ async fn relay_test_max_control_streams() {
     tracing::info!("first connection");
 
     // make the first connection
-    let node1 = Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    let node1 = Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .unwrap();
 
     tracing::info!("second (expect to fail) connection");
 
     // the second connection should error
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_err());
 
@@ -101,7 +107,7 @@ async fn relay_test_max_control_streams() {
     tracing::info!("third connection");
 
     // the third connection should be a success again
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_ok());
 }
@@ -115,7 +121,10 @@ async fn relay_test_max_control_streams_per_ip() {
     tracing::info!("setup relay");
 
     let relay_config = Tx3RelayConfig {
-        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        bind: vec![
+            ("127.0.0.1:0", true).into_bind_spec().unwrap(),
+            ("[::1]:0", true).into_bind_spec().unwrap(),
+        ],
         max_control_streams_per_ip: 1,
         ..Default::default()
     };
@@ -125,15 +134,22 @@ async fn relay_test_max_control_streams_per_ip() {
 
     tracing::info!("first connection");
 
-    // make the first connection
-    let node1 = Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    // make the first connection (ipv4)
+    let node1 = Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .unwrap();
 
-    tracing::info!("second (expect to fail) connection");
+    tracing::info!("second connection");
 
-    // the second connection should error
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    // make the second connection (ipv6)
+    let _node2 = Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
+        .await
+        .unwrap();
+
+    tracing::info!("third (expect to fail) connection");
+
+    // the third connection should error
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_err());
 
@@ -145,10 +161,10 @@ async fn relay_test_max_control_streams_per_ip() {
     // give the system time to notify the socket is closed
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    tracing::info!("third connection");
+    tracing::info!("fourth connection");
 
-    // the third connection should be a success again
-    assert!(Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+    // the fourth connection should be a success again
+    assert!(Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
         .await
         .is_ok());
 }
@@ -161,7 +177,10 @@ async fn relay_test_max_relays_per_control() {
     tracing::info!("setup relay");
 
     let relay_config = Tx3RelayConfig {
-        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        bind: vec![
+            ("127.0.0.1:0", true).into_bind_spec().unwrap(),
+            ("[::1]:0", true).into_bind_spec().unwrap(),
+        ],
         max_relays_per_control: 1,
         ..Default::default()
     };
@@ -173,7 +192,7 @@ async fn relay_test_max_relays_per_control() {
 
     // setup the main addressee
     let (main_ep, mut main_recv) =
-        Tx3Node::new(Tx3Config::new().with_bind(&r_addr))
+        Tx3Node::new(Tx3Config::new().with_relay(&r_addr).unwrap())
             .await
             .unwrap();
     let main_addr = main_ep.local_addr().clone();
@@ -201,10 +220,26 @@ async fn relay_test_max_relays_per_control() {
 
     tracing::info!("make first connection");
 
-    let (n1, _) = Tx3Node::new(Tx3Config::new()).await.unwrap();
+    let (n1, _) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let mut c1 = n1.connect(&main_addr).await.unwrap();
 
-    let (n2, _) = Tx3Node::new(Tx3Config::new()).await.unwrap();
+    let (n2, _) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
 
     tracing::info!("should fail to make second connection");
 
@@ -226,7 +261,15 @@ async fn relay_test_max_relays_per_control() {
 
     tracing::info!("make third connection");
 
-    let (n3, _) = Tx3Node::new(Tx3Config::new()).await.unwrap();
+    let (n3, _) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     // we are able to successfully establish c3
     let mut c3 = n3.connect(&main_addr).await.unwrap();
 

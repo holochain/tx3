@@ -18,10 +18,15 @@ fn init_tracing() {
 async fn smoke_test_st() {
     init_tracing();
 
-    let (node1, mut recv1) =
-        Tx3Node::new(Tx3Config::default().with_bind("tx3:-/st/127.0.0.1:0/"))
-            .await
-            .unwrap();
+    let (node1, mut recv1) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let addr1 = node1.local_addr().clone();
     tracing::info!(%addr1);
 
@@ -34,7 +39,15 @@ async fn smoke_test_st() {
         con.write_all(b"world").await.unwrap();
     });
 
-    let (node2, _) = Tx3Node::new(Tx3Config::default()).await.unwrap();
+    let (node2, _) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
 
     let mut con = node2.connect(addr1).await.unwrap();
     con.write_all(b"hello").await.unwrap();
@@ -50,7 +63,10 @@ async fn smoke_test_rst() {
     init_tracing();
 
     let relay_config = Tx3RelayConfig {
-        bind: vec![([127, 0, 0, 1], 0, true).into()],
+        bind: vec![
+            ("127.0.0.1:0", true).into_bind_spec().unwrap(),
+            ("[::1]:0", true).into_bind_spec().unwrap(),
+        ],
         ..Default::default()
     };
 
@@ -59,7 +75,7 @@ async fn smoke_test_rst() {
     tracing::info!(%addr_r);
 
     let (node1, mut recv1) =
-        Tx3Node::new(Tx3Config::default().with_bind(&addr_r))
+        Tx3Node::new(Tx3Config::default().with_relay(&addr_r).unwrap())
             .await
             .unwrap();
     let addr1 = node1.local_addr().clone();
@@ -74,7 +90,15 @@ async fn smoke_test_rst() {
         con.write_all(b"world").await.unwrap();
     });
 
-    let (node2, _) = Tx3Node::new(Tx3Config::default()).await.unwrap();
+    let (node2, _) = Tx3Node::new(
+        Tx3Config::default()
+            .with_bind(("127.0.0.1:0", true))
+            .unwrap()
+            .with_bind(("[::1]:0", true))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let mut con = node2.connect(addr1).await.unwrap();
     con.write_all(b"hello").await.unwrap();
     let mut buf = [0; 5];

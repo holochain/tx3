@@ -59,7 +59,11 @@ welcome and encouraged to make direct connections, instead of relaying.
 #### Run a locally addressable tx3 node
 
 ```rust
-let tx3_config = tx3::Tx3Config::new().with_bind("tx3:-/st/127.0.0.1:0/");
+let tx3_config = tx3::Tx3Config::new()
+    // The extra (true) on the end lets us use the loopback interface,
+    // normally that is an invalid configuration for a node.
+    .with_bind(("127.0.0.1:0", true)).unwrap()
+    .with_bind(("[::1]:0", true)).unwrap();
 
 let (node, _inbound_con) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 
@@ -75,7 +79,8 @@ See below for `tx3-relay` commandline flags and options.
 let tx3_relay_config = tx3::relay::Tx3RelayConfig::default()
     // The extra (true) on the end lets us use the loopback interface,
     // normally that is an invalid configuration for a relay server.
-    .with_bind(([127, 0, 0, 1], 0, true));
+    .with_bind(("127.0.0.1:0", true)).unwrap()
+    .with_bind(("[::1]:0", true)).unwrap();
 let relay = tx3::relay::Tx3Relay::new(tx3_relay_config).await.unwrap();
 
 println!("relay listening on address: {:?}", relay.local_addr());
@@ -87,7 +92,7 @@ println!("relay listening on address: {:?}", relay.local_addr());
 // set relay_addr to your relay address, something like:
 // let relay_addr = "tx3:EHoKZ3-8R520Unp3vr4xeP6ogYAqoZ-em8lm-rMlwhw/rst/127.0.0.1:38141/";
 
-let tx3_config = tx3::Tx3Config::new().with_bind(relay_addr);
+let tx3_config = tx3::Tx3Config::new().with_relay(relay_addr).unwrap();
 
 let (node, _inbound_con) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 
@@ -98,7 +103,9 @@ println!("listening on address: {:?}", node.local_addr());
 
 ```rust
 // create a listening node
-let tx3_config = tx3::Tx3Config::new().with_bind("tx3:-/st/127.0.0.1:0/");
+let tx3_config = tx3::Tx3Config::new()
+    .with_bind(("127.0.0.1:0", true)).unwrap()
+    .with_bind(("[::1]:0", true)).unwrap();
 let (node1, mut recv1) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 let addr1 = node1.local_addr().clone();
 
@@ -120,8 +127,10 @@ let task = tokio::task::spawn(async move {
     in_con.shutdown().await.unwrap();
 });
 
-// create an outgoing-only node
-let tx3_config = tx3::Tx3Config::new();
+// create a node for the outgoing connection
+let tx3_config = tx3::Tx3Config::new()
+    .with_bind(("127.0.0.1:0", true)).unwrap()
+    .with_bind(("[::1]:0", true)).unwrap();
 let (node2, _) = tx3::Tx3Node::new(tx3_config).await.unwrap();
 
 // connect from our outgoing node to our receive node

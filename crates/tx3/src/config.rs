@@ -95,67 +95,63 @@ impl Tx3BindSpec {
     }
 }
 
-impl From<([u8; 4], u16)> for Tx3BindSpec {
-    fn from(s: ([u8; 4], u16)) -> Self {
-        let ip = s.0.into();
-        Tx3BindSpec {
-            local_interface: std::net::SocketAddr::V4(
-                std::net::SocketAddrV4::new(ip, s.1),
-            ),
-            wan_host: ip.to_string(),
-            wan_port: s.1,
+/// Indicates a type that can be turned into a `Tx3BindSpec`.
+pub trait IntoBindSpec {
+    /// Convert this type into a `Tx3BindSpec`.
+    fn into_bind_spec(self) -> Result<Tx3BindSpec>;
+}
+
+impl IntoBindSpec for Tx3BindSpec {
+    #[inline(always)]
+    fn into_bind_spec(self) -> Result<Tx3BindSpec> {
+        Ok(self)
+    }
+}
+
+impl IntoBindSpec for &Tx3BindSpec {
+    #[inline(always)]
+    fn into_bind_spec(self) -> Result<Tx3BindSpec> {
+        Ok(self.clone())
+    }
+}
+
+impl IntoBindSpec for &str {
+    #[inline(always)]
+    fn into_bind_spec(self) -> Result<Tx3BindSpec> {
+        use std::str::FromStr;
+        let addr = std::net::SocketAddr::from_str(self).map_err(other_err)?;
+        let wan_host = match &addr {
+            std::net::SocketAddr::V4(a) => a.ip().to_string(),
+            std::net::SocketAddr::V6(a) => format!("[{}]", a.ip()),
+        };
+        Ok(Tx3BindSpec {
+            local_interface: addr,
+            wan_host,
+            wan_port: addr.port(),
             enabled: true,
             allow_non_global_host: false,
             notes: Vec::new(),
-        }
+        })
     }
 }
 
-impl From<([u8; 4], u16, bool)> for Tx3BindSpec {
-    fn from(s: ([u8; 4], u16, bool)) -> Self {
-        let ip = s.0.into();
-        Tx3BindSpec {
-            local_interface: std::net::SocketAddr::V4(
-                std::net::SocketAddrV4::new(ip, s.1),
-            ),
-            wan_host: ip.to_string(),
-            wan_port: s.1,
+impl IntoBindSpec for (&str, bool) {
+    #[inline(always)]
+    fn into_bind_spec(self) -> Result<Tx3BindSpec> {
+        use std::str::FromStr;
+        let addr = std::net::SocketAddr::from_str(self.0).map_err(other_err)?;
+        let wan_host = match &addr {
+            std::net::SocketAddr::V4(a) => a.ip().to_string(),
+            std::net::SocketAddr::V6(a) => format!("[{}]", a.ip()),
+        };
+        Ok(Tx3BindSpec {
+            local_interface: addr,
+            wan_host,
+            wan_port: addr.port(),
             enabled: true,
-            allow_non_global_host: s.2,
+            allow_non_global_host: self.1,
             notes: Vec::new(),
-        }
-    }
-}
-
-impl From<([u8; 16], u16)> for Tx3BindSpec {
-    fn from(s: ([u8; 16], u16)) -> Self {
-        let ip = s.0.into();
-        Tx3BindSpec {
-            local_interface: std::net::SocketAddr::V6(
-                std::net::SocketAddrV6::new(ip, s.1, 0, 0),
-            ),
-            wan_host: format!("[{}]", ip),
-            wan_port: s.1,
-            enabled: true,
-            allow_non_global_host: false,
-            notes: Vec::new(),
-        }
-    }
-}
-
-impl From<([u8; 16], u16, bool)> for Tx3BindSpec {
-    fn from(s: ([u8; 16], u16, bool)) -> Self {
-        let ip = s.0.into();
-        Tx3BindSpec {
-            local_interface: std::net::SocketAddr::V6(
-                std::net::SocketAddrV6::new(ip, s.1, 0, 0),
-            ),
-            wan_host: format!("[{}]", ip),
-            wan_port: s.1,
-            enabled: true,
-            allow_non_global_host: s.2,
-            notes: Vec::new(),
-        }
+        })
     }
 }
 
@@ -204,10 +200,16 @@ impl Tx3Config {
         Tx3Config::default()
     }
 
+    /// Append a relay address to the list of relays
+    pub fn with_relay<A: IntoAddr>(mut self, addr: A) -> Result<Self> {
+        self.relay_list.push(addr.into_addr()?);
+        Ok(self)
+    }
+
     /// Append a bind to the list of bindings
-    pub fn with_bind<B: Into<Tx3BindSpec>>(mut self, bind: B) -> Self {
-        self.bind.push(bind.into());
-        self
+    pub fn with_bind<B: IntoBindSpec>(mut self, bind: B) -> Result<Self> {
+        self.bind.push(bind.into_bind_spec()?);
+        Ok(self)
     }
 
     /// Specify a tls config to use.
